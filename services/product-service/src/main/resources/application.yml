@@ -1,0 +1,56 @@
+server:
+  port: 8082
+  shutdown: graceful
+
+spring:
+  application:
+    name: product-service
+  datasource:
+    url: jdbc:h2:mem:productdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+app:
+  seed:
+    enabled: ${APP_SEED_ENABLED:true}
+
+# Actuator: /actuator/health (+ liveness/readiness probes), /actuator/metrics, /actuator/prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    version: 1.0.0
+    description: Product catalog microservice of the DevSecOps sample platform
+
+logging:
+  level:
+    com.devsecops: INFO
+    org.springframework.web: INFO

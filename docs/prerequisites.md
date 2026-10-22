@@ -7,8 +7,11 @@ Two environments are used in this project:
 - **Windows host** — editor (VS Code), browser for GitHub.
 - **WSL2 Ubuntu (recommended working environment)** — git, Java, Maven, Docker CLI, kind, kubectl, Terraform, Ansible, Trivy, Ollama.
 
-> **Why WSL2 and not the Windows filesystem?**
-> Docker builds, kind clusters, and the monitoring stack are Linux-native. Building from inside WSL2 home (`~/`) is 5-10x faster than building from `/mnt/c/...`, and it avoids CRLF, file-permission, and OneDrive file-lock problems in Maven/Docker. If you keep the project on OneDrive, at least **clone it into `~/` inside WSL2 for Phases 3-6**.
+> **Keep the Windows clone on a short, plain-ASCII path.**
+> Maven/Java and OneDrive both misbehave when the project path contains non-ASCII characters (e.g. `เอกสาร`) or is synced: `mvn` fails with `Cannot create resource output directory: ...\target\classes`. Use something like `C:\Users\<you>\devsecops-agentic-platform` — never a path under `OneDrive\เอกสาร\`.
+>
+> **Why WSL2 for Phases 3-6?**
+> Docker builds, kind clusters, and the monitoring stack are Linux-native. Building from inside WSL2 home (`~/`) is 5-10x faster than building from `/mnt/c/...`, and it avoids CRLF and file-permission problems in Maven/Docker. Clone into `~/devsecops-agentic-platform` inside WSL2 for Phases 3-6.
 
 ---
 

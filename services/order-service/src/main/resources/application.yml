@@ -1,0 +1,59 @@
+server:
+  port: 8083
+  shutdown: graceful
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:h2:mem:orderdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+# Downstream services. Kubernetes overrides these with Service DNS names.
+clients:
+  user-service:
+    base-url: ${USER_SERVICE_URL:http://localhost:8081}
+  product-service:
+    base-url: ${PRODUCT_SERVICE_URL:http://localhost:8082}
+
+# Actuator: /actuator/health (+ liveness/readiness probes), /actuator/metrics, /actuator/prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    version: 1.0.0
+    description: Order microservice of the DevSecOps sample platform
+
+logging:
+  level:
+    com.devsecops: INFO
+    org.springframework.web: INFO

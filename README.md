@@ -9,13 +9,13 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 ## Status
 
 <!-- Badges are added in Phase 2 (CI), Phase 7 (security), later phases as they land. -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
-[![Security](https://github.com/OWNER/REPO/actions/workflows/security.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/security.yml)
+[![CI](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml)
+[![Security](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml)
 
 | Phase | Scope | Status |
 |------:|-------|--------|
 | 0 | Repo skeleton, README, prerequisites | done |
-| 1 | Microservices app + Git workflow | pending |
+| 1 | Microservices app + Git workflow | done |
 | 2 | CI pipeline (build matrix, tests, caching, artifacts) | pending |
 | 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | pending |
 | 4 | Kubernetes manifests on kind + CD and rollback | pending |
@@ -134,14 +134,67 @@ devsecops-agentic-platform/
 ## Getting started
 
 1. Install the toolchain — see the [prerequisites checklist](docs/prerequisites.md).
-2. Clone the repo **inside WSL2** (recommended, see the checklist notes):
+2. Clone the repo. **Use a short, plain-ASCII path** — a path containing non-ASCII characters (e.g. `เอกสาร`) or a OneDrive-synced folder makes Maven fail with `Cannot create resource output directory`.
    ```bash
-   git clone https://github.com/<you>/devsecops-agentic-platform.git ~/devsecops-agentic-platform
-   cd ~/devsecops-agentic-platform
+   # WSL2 (recommended for Phases 3-6)
+   git clone https://github.com/Aarthi035/devsecops-agentic-platform.git ~/devsecops-agentic-platform
+
+   # Windows (Phases 0-2 are fine here)
+   git clone https://github.com/Aarthi035/devsecops-agentic-platform.git C:\Users\<you>\devsecops-agentic-platform
+
+   cd devsecops-agentic-platform
    ```
 3. Run the verification commands at the end of [docs/prerequisites.md](docs/prerequisites.md) — all must pass before Phase 1.
 
 Per-phase run instructions are added to this README as each phase lands.
+
+---
+
+## Microservices (Phase 1)
+
+Three Spring Boot 3.3.5 services on Java 17, each with its own H2 in-memory database, Actuator + Micrometer Prometheus metrics, and a JUnit 5 test suite.
+
+| Service | Port | Database | Responsibility |
+|---------|-----:|----------|----------------|
+| user-service | 8081 | `userdb` | CRUD for users, seeds 5 demo users |
+| product-service | 8082 | `productdb` | CRUD for products, seeds 6 demo products |
+| order-service | 8083 | `orderdb` | Places orders by calling the other two over REST |
+
+`order-service` is the consumer: `POST /api/orders` fetches the user, fetches the product, rejects inactive users and insufficient stock, then stores the order with a price snapshot.
+
+### REST API
+
+| Method | user-service | product-service | order-service |
+|--------|--------------|-----------------|---------------|
+| GET | `/api/users`, `/api/users/{id}`, `/api/users?email=` | `/api/products`, `/api/products/{id}`, `/api/products?category=` | `/api/orders`, `/api/orders/{id}`, `/api/orders?userId=` |
+| POST | `/api/users` → 201 + `Location` | `/api/products` → 201 + `Location` | `/api/orders` → 201 + `Location`, `/api/orders/{id}/confirm`, `/api/orders/{id}/cancel` |
+| PUT | `/api/users/{id}` | `/api/products/{id}` | — |
+| DELETE | `/api/users/{id}` → 204 | `/api/products/{id}` → 204 | — |
+
+- Error body is identical across services: `{timestamp, status, error, message, path}`.
+- Status codes: `400` validation, `404` unknown id, `409` duplicate data / business rule (inactive user, insufficient stock), `502` downstream service unreachable.
+- Actuator on every service: `/actuator/health` plus `/actuator/health/liveness` and `/actuator/health/readiness` (used by the Kubernetes probes in Phase 4), `/actuator/metrics`, `/actuator/prometheus`.
+
+### Run locally
+
+```bash
+# one terminal per service, from the repository root
+cd services/user-service    && mvn spring-boot:run
+cd services/product-service && mvn spring-boot:run
+cd services/order-service   && mvn spring-boot:run
+```
+
+`order-service` calls `http://localhost:8081` and `http://localhost:8082` by default; override with `USER_SERVICE_URL` / `PRODUCT_SERVICE_URL` (Kubernetes does this in Phase 4).
+
+### Test
+
+```bash
+cd services/user-service    && mvn -B clean verify
+cd services/product-service && mvn -B clean verify
+cd services/order-service   && mvn -B clean verify
+```
+
+Each service has unit tests (Mockito) and API tests (MockMvc). Integration tests disable seeding with `APP_SEED_ENABLED=false` so they start from an empty database.
 
 ---
 
