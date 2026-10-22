@@ -1,0 +1,108 @@
+# user-service: Deployment + ClusterIP Service.
+#
+# The container ports, health endpoints and hardening flags mirror what the
+# Phase 3 Dockerfile already does, so the same image runs here unchanged.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  # HPA (30-hpa.yaml) owns the replica count; 1 keeps the laptop footprint low.
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: user-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: user-service
+        app.kubernetes.io/part-of: devsecops-platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # Give the JVM time for its graceful shutdown before SIGKILL.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: user-service
+          image: devsecops/user-service:1.0.0
+          # The image is side-loaded with "kind load docker-image", so there is
+          # nothing to pull. A registry-based deploy flips this to Always.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-credentials
+          resources:
+            requests:
+              cpu: 100m
+              memory: 320Mi
+            limits:
+              cpu: 500m
+              memory: 640Mi
+          # startupProbe gates the other two: they only run once the JVM is up.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The JVM and Tomcat need a writable temp dir; the rest is read-only.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: user-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: user-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP

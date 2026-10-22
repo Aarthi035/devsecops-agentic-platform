@@ -1,0 +1,138 @@
+name: CD
+
+# Continuous deployment.
+#
+# CI publishes the images to GHCR. This workflow picks up a successful CI run,
+# stands up a throwaway kind cluster, loads the published images into it,
+# applies the manifests in k8s/, and smoke-tests the result through the Ingress.
+# If the smoke test fails, every Deployment is rolled back - that is the
+# rollback step the project spec asks for.
+#
+# It runs on GitHub's runners rather than the laptop because a runner can create
+# its own kind cluster, so the whole deploy is reproducible without a tunnel
+# back to the local machine. The laptop equivalent of these steps is documented
+# in the README under "Phase 4 - Kubernetes".
+#
+# NOTE: rolling back only helps from the second deployment onwards. The very
+# first deploy has a single revision, so "rollout undo" is a no-op there and
+# the diagnostics dump below is what tells you what went wrong.
+
+on:
+  # Run after CI, on every branch CI runs on - the branch filter is applied to
+  # the triggering CI run so a failed feature branch is never the last word.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  # Allow a manual re-deploy of the current ref.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  REGISTRY: ghcr.io
+  CLUSTER_NAME: devsecops
+  NAMESPACE: devsecops
+  KIND_VERSION: v0.33.0
+  INGRESS_NGINX_VERSION: controller-v1.11.3
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Only deploy a CI run that actually succeeded. A manual dispatch always runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Create kind cluster
+        # Pinned to kindest/node:v1.33.12 and published on host port 8090 by
+        # kind/kind-config.yaml, exactly like the laptop cluster.
+        run: kind create cluster --config kind/kind-config.yaml
+
+      - name: Install ingress-nginx
+        run: |
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=240s
+
+      - name: Install metrics-server
+        # metrics-server refuses to talk to kind's self-signed kubelet certificate
+        # unless it is told to skip verification. Without this the HPA never
+        # leaves "cpu: <unknown>".
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          kubectl patch deployment metrics-server -n kube-system --type=json \
+            -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl wait --namespace kube-system --for=condition=available deployment/metrics-server --timeout=240s
+
+      - name: Pull images from GHCR and load them into the cluster
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="$(echo "${IMAGE_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "${GHCR_TOKEN}" | docker login "${REGISTRY}" -u "${GHCR_USER}" --password-stdin
+          for svc in user-service product-service order-service; do
+            docker pull "${REGISTRY}/${OWNER}/${svc}:latest"
+            # The manifests reference the short local name, so retag before loading.
+            docker tag "${REGISTRY}/${OWNER}/${svc}:latest" "devsecops/${svc}:1.0.0"
+            kind load docker-image --name "${CLUSTER_NAME}" "devsecops/${svc}:1.0.0"
+          done
+
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -f k8s/
+
+      - name: Wait for rollout
+        run: |
+          kubectl wait --for=condition=available deployment --all -n "${NAMESPACE}" --timeout=300s
+          kubectl get pods -n "${NAMESPACE}"
+
+      - name: Smoke test through the Ingress
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl -sf http://localhost:8090/api/users > /tmp/users.json; then break; fi
+            echo "attempt $i: ingress not ready yet"
+            sleep 5
+          done
+          grep -q "aarthi@example.com" /tmp/users.json
+          curl -sf http://localhost:8090/api/products > /dev/null
+          curl -sf -X POST http://localhost:8090/api/orders \
+            -H 'Content-Type: application/json' \
+            -d '{"userId":1,"productId":1,"quantity":2}' > /tmp/order.json
+          cat /tmp/order.json
+          grep -q '"status":"CREATED"' /tmp/order.json
+
+      - name: Report cluster state
+        if: always()
+        run: |
+          kubectl get pods,hpa,ingress -n "${NAMESPACE}" || true
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          echo "Deployment failed - rolling back every Deployment in ${NAMESPACE}"
+          for d in $(kubectl get deployment -n "${NAMESPACE}" -o name); do
+            kubectl rollout undo "${d}" -n "${NAMESPACE}" || true
+          done
+          kubectl wait --for=condition=available deployment --all -n "${NAMESPACE}" --timeout=180s || true
+          echo "--- diagnostics ---"
+          kubectl describe pods -n "${NAMESPACE}" | tail -n 80 || true

@@ -1,0 +1,41 @@
+# Single Ingress for all three APIs, served by the nginx Ingress controller.
+#
+# No "host" is set, so the rule matches any Host header - which is what makes
+# "curl http://localhost:8090/api/products" work without editing your hosts
+# file. Add a host (for example devsecops.local) for a host-based setup.
+#
+# Requires the ingress-nginx controller:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devsecops-api
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service
+                port:
+                  number: 8081
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: product-service
+                port:
+                  number: 8082
+          - path: /api/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: order-service
+                port:
+                  number: 8083

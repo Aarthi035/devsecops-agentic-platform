@@ -10,6 +10,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 
 <!-- Badges are added in Phase 2 (CI), Phase 7 (security), later phases as they land. -->
 [![CI](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml)
+[![CD](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/cd.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/cd.yml)
 
 | Phase | Scope | Status |
 |------:|-------|--------|
@@ -17,7 +18,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 1 | Microservices app + Git workflow | done |
 | 2 | CI pipeline (build matrix, tests, caching, artifacts) | done |
 | 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | done |
-| 4 | Kubernetes manifests on kind + CD and rollback | pending |
+| 4 | Kubernetes manifests on kind + CD and rollback | done |
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | pending |
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | pending |
 | 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | pending |
@@ -104,11 +105,17 @@ devsecops-agentic-platform/
 │   └── playbooks/
 ├── docs/                     # prerequisites, architecture, report outline, demo scripts
 ├── evals/                    # failure scenarios, expected root causes, runner script (Phase 10)
-├── k8s/
-│   ├── base/                 # per-service Deployment/Service/ConfigMap/Secret/HPA/Ingress
-│   ├── monitoring/
-│   ├── network-policies/
-│   └── rbac/
+├── k8s/                      # Phase 4 - applied in filename order
+│   ├── 00-namespace.yaml
+│   ├── 10-configmap.yaml
+│   ├── 11-secret.yaml
+│   ├── 20-user-service.yaml  # Deployment + ClusterIP Service
+│   ├── 21-product-service.yaml
+│   ├── 22-order-service.yaml
+│   ├── 30-hpa.yaml
+│   └── 40-ingress.yaml
+├── kind/
+│   └── kind-config.yaml      # cluster definition: port 80 -> host 8090
 ├── monitoring/
 │   ├── alertmanager/
 │   ├── grafana/dashboards/
@@ -241,6 +248,129 @@ ghcr.io/aarthi035/devsecops-agentic-platform/user-service:latest
 ```
 
 It authenticates with the built-in `GITHUB_TOKEN` (job-level `permissions: packages: write`), so no long-lived registry secret is stored. Phase 4 consumes these images in Kubernetes.
+
+---
+
+## Kubernetes (Phase 4)
+
+The three services run on a local **kind** cluster. `kind/kind-config.yaml` defines it:
+
+- a single control-plane node labelled `ingress-ready=true` — the label the ingress-nginx kind manifest selects on
+- node image pinned to `kindest/node:v1.33.12`
+- node port `80` published on host port **8090** (and `443` on `8443`), which is what makes the Ingress reachable from the laptop
+
+Kubernetes 1.33 is pinned deliberately: kind's default node image (v1.37) never brings the control plane up on a host running cgroup v1, which is the case for this Docker Desktop install.
+
+| Manifest | Object | Purpose |
+|----------|--------|---------|
+| `k8s/00-namespace.yaml` | `Namespace/devsecops` | isolates the app |
+| `k8s/10-configmap.yaml` | `ConfigMap/app-config` | `APP_SEED_ENABLED`, `USER_SERVICE_URL`, `PRODUCT_SERVICE_URL` |
+| `k8s/11-secret.yaml` | `Secret/app-credentials` | secret **shape** only — values are injected at deploy time so no credential is ever committed |
+| `k8s/20..22-*.yaml` | `Deployment` + `ClusterIP Service` | one per service, with probes and resource limits |
+| `k8s/30-hpa.yaml` | `HorizontalPodAutoscaler` ×3 | `autoscaling/v2`, 1→3 replicas, target 70% CPU |
+| `k8s/40-ingress.yaml` | `Ingress/devsecops-api` | routes `/api/users`, `/api/products`, `/api/orders` to the right Service |
+
+Pod hardening — every pod runs with:
+
+- `runAsNonRoot: true`, `runAsUser/runAsGroup/fsGroup: 1001` (matches the Dockerfile's `app` user)
+- `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`
+- `readOnlyRootFilesystem: true` with an `emptyDir` mounted at `/tmp` for the JVM's temp files
+- `capabilities.drop: ["ALL"]`
+
+Three probes per container: a `startupProbe` on `/actuator/health/readiness` (5 s period, 30 failures — up to ~150 s for the JVM to boot) gates a `readinessProbe` on the same path and a `livenessProbe` on `/actuator/health/liveness`. Requests are `100m`/`320Mi`, limits `500m`/`640Mi` per pod. The rollout strategy is `maxUnavailable: 0` / `maxSurge: 1`, so a bad image can never take the service down.
+
+### Create the cluster
+
+```bash
+kind create cluster --config kind/kind-config.yaml
+kubectl get nodes
+```
+
+### Install the two add-ons
+
+Neither is part of kind; both must be installed before the manifests behave:
+
+```bash
+# Ingress controller. The "kind" provider manifest pins the controller to a node
+# with the label set in kind-config.yaml and binds host ports 80/443.
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
+kubectl wait --namespace ingress-nginx --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller --timeout=240s
+
+# metrics-server, which is what feeds the HPA.
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl patch deployment metrics-server -n kube-system --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl wait --namespace kube-system --for=condition=available deployment/metrics-server --timeout=240s
+```
+
+The `--kubelet-insecure-tls` patch is mandatory on kind: metrics-server otherwise rejects the kubelet's self-signed certificate and the HPAs stay at `cpu: <unknown>` forever.
+
+### Deploy
+
+Local development loads the images straight from the Docker daemon into the node, so no registry round-trip is needed:
+
+```bash
+kind load docker-image --name devsecops \
+  devsecops/user-service:1.0.0 devsecops/product-service:1.0.0 devsecops/order-service:1.0.0
+
+kubectl apply -f k8s/
+kubectl wait --for=condition=available deployment --all -n devsecops --timeout=300s
+kubectl get pods,svc,ingress,hpa -n devsecops
+```
+
+### Verify
+
+```bash
+# every pod Ready, and non-root
+kubectl get pods -n devsecops
+kubectl exec -n devsecops deploy/user-service -- id        # uid=1001(app) gid=1001(app)
+
+# Ingress routing from the host (port 8090 -> node port 80)
+curl http://localhost:8090/api/users
+curl http://localhost:8090/api/products
+
+# end-to-end: order-service calls the other two over REST inside the cluster
+curl -X POST http://localhost:8090/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":1,"productId":1,"quantity":3}'
+curl -X POST http://localhost:8090/api/orders/1/confirm
+
+# HPA has real numbers, not "<unknown>"
+kubectl top pods -n devsecops
+kubectl get hpa -n devsecops
+```
+
+### Rollback
+
+`maxUnavailable: 0` means a failing rollout leaves the previous pods serving. To prove it, push a bad tag:
+
+```bash
+kubectl set image deployment/user-service user-service=devsecops/user-service:9.9.9 -n devsecops
+kubectl get pods -n devsecops -l app.kubernetes.io/name=user-service   # new pod ErrImagePull
+curl -o /dev/null -s -w '%{http_code}\n' http://localhost:8090/api/users   # still 200
+
+kubectl rollout undo deployment/user-service -n devsecops
+kubectl rollout status deployment/user-service -n devsecops --timeout=120s
+```
+
+`revisionHistoryLimit: 5` keeps the last five ReplicaSets, so `kubectl rollout history` / `rollout undo` work for the last few deploys.
+
+### CD
+
+[`.github/workflows/cd.yml`](.github/workflows/cd.yml) triggers on a **successful** `CI` run (and on manual dispatch). It installs kind on the runner, creates a cluster from the same `kind/kind-config.yaml`, installs both add-ons, pulls the published images from GHCR, retags them to the names the manifests expect, applies `k8s/`, waits for the rollout, and then smoke-tests `/api/users`, `/api/products` and `POST /api/orders` through the Ingress on port 8090. Any failure runs the **rollback** step: `kubectl rollout undo` for every Deployment, then a diagnostics dump.
+
+The CD workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`packages: read`).
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `kind create cluster` fails in `wait-control-plane`, kubeadm logs `could not find officially supported version of etcd` | Host runs cgroup v1 and the node image is too new. Pin `kindest/node:v1.33.12` in `kind-config.yaml` as this repo does. |
+| `failed to lock config file: .../.kube/config.lock: Access is denied` | The sandbox refuses writes to `~/.kube`. Create the cluster anyway, then `kind export kubeconfig --name devsecops --kubeconfig <path>` and point `KUBECONFIG` at that path. |
+| Pods stuck `ImagePullBackOff` on `registry.k8s.io/...` with `TLS handshake timeout` | The node can't reach the CDN. Pull on the host instead (`docker pull <image>`) and `kind load docker-image` it in. |
+| HPA shows `cpu: <unknown>/70%` | metrics-server missing or missing the `--kubelet-insecure-tls` patch. Confirm with `kubectl top pods -n devsecops`. |
+| `kubectl get ingress` has no `ADDRESS` | ingress-nginx is not ready, or the controller pod is not on a node labelled `ingress-ready=true`. |
 
 ---
 

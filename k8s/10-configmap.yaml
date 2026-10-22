@@ -1,0 +1,17 @@
+# Non-secret environment shared by the services. Every deployment reads this
+# with envFrom, so a key that a service does not use is simply ignored.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  # Seed demo users and products so the order flow has data to work with.
+  APP_SEED_ENABLED: "true"
+
+  # In-cluster DNS names. order-service calls these two over REST; the other
+  # services ignore the keys, which is why one ConfigMap is enough.
+  USER_SERVICE_URL: "http://user-service:8081"
+  PRODUCT_SERVICE_URL: "http://product-service:8082"

@@ -1,0 +1,8 @@
+# One namespace for the whole platform, so a demo can be reset with
+# "kubectl delete namespace devsecops".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
