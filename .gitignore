@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# Java / Maven
+# ---------------------------------------------------------------------------
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.properties
+
+# ---------------------------------------------------------------------------
+# IDE / Editor
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+!.vscode/extensions.json
+.settings/
+.project
+.classpath
+.factorypath
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+# Secrets (NEVER commit)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+kubeconfig
+*.kubeconfig
+
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ---------------------------------------------------------------------------
+# Ansible
+# ---------------------------------------------------------------------------
+*.retry
+ansible/inventory/hosts.local
+.vault_pass
+
+# ---------------------------------------------------------------------------
+# Docker / Kubernetes
+# ---------------------------------------------------------------------------
+docker-compose.override.yml
+*.tar
+*.tar.gz
+kind-config.local.yaml
+
+# ---------------------------------------------------------------------------
+# Logs / runtime artifacts
+# ---------------------------------------------------------------------------
+*.log
+logs/
+loki-data/
+prometheus-data/
+grafana-data/
+app-data/
+
+# ---------------------------------------------------------------------------
+# Build / scan reports
+# ---------------------------------------------------------------------------
+**/dependency-check-report.*
+**/trivy-report.json
+**/gitleaks-report.json
+evals/results/
+evals/**/agent-output.json
+
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini

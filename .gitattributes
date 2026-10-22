@@ -1,0 +1,29 @@
+# Normalize line endings so shell scripts keep LF (they run inside Linux containers)
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.tf        text eol=lf
+*.tpl       text eol=lf
+Dockerfile  text eol=lf
+*.conf      text eol=lf
+
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binary files
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.jar       binary
+*.gz        binary
+*.zip       binary
+
+# Keep generated/vendored files out of language stats and diffs
+evals/results/**  linguist-generated=true
+target/**         linguist-vendored=true
