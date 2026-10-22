@@ -10,7 +10,6 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 
 <!-- Badges are added in Phase 2 (CI), Phase 7 (security), later phases as they land. -->
 [![CI](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml)
-[![Security](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml)
 
 | Phase | Scope | Status |
 |------:|-------|--------|
