@@ -16,7 +16,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 |------:|-------|--------|
 | 0 | Repo skeleton, README, prerequisites | done |
 | 1 | Microservices app + Git workflow | done |
-| 2 | CI pipeline (build matrix, tests, caching, artifacts) | pending |
+| 2 | CI pipeline (build matrix, tests, caching, artifacts) | done |
 | 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | pending |
 | 4 | Kubernetes manifests on kind + CD and rollback | pending |
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | pending |
@@ -195,6 +195,28 @@ cd services/order-service   && mvn -B clean verify
 ```
 
 Each service has unit tests (Mockito) and API tests (MockMvc). Integration tests disable seeding with `APP_SEED_ENABLED=false` so they start from an empty database.
+
+---
+
+## CI pipeline (Phase 2)
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
+
+| Job | What it does |
+|-----|--------------|
+| `build` (matrix: 3 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
+| `ci-status` | Single gate for branch protection — fails if **any** matrix leg failed |
+
+Design notes:
+
+- **Matrix, `fail-fast: false`** — the three services are independent Maven projects, so they build in parallel and one failure never hides another.
+- **Caching** — `actions/setup-java` caches `~/.m2/repository` keyed on each service's `pom.xml`, so a dependency change invalidates the cache and a code-only change reuses it.
+- **Artifacts** — `test-reports-<service>` (7 days) and `<service>-jar` (7 days). The jars are what Phase 3's Docker build consumes.
+- **Least privilege** — the workflow declares `permissions: contents: read`; it cannot push, tag or comment.
+- **Concurrency** — pushing twice to the same branch cancels the in-flight run instead of queueing.
+- **No third-party actions** beyond `actions/checkout`, `actions/setup-java` and `actions/upload-artifact`, which keeps the supply-chain surface small before Phase 7 starts scanning it.
+
+The badge at the top of this README reflects the `main` branch run.
 
 ---
 

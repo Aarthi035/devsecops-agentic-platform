@@ -1,0 +1,112 @@
+name: CI
+
+# Phase 2: build every service on every push/PR, run its tests, keep the
+# reports and the runnable jars. No deployment here - that is Phase 4.
+
+on:
+  push:
+    branches: [main, dev, 'feature/**']
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Least privilege: this workflow only needs to read the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_ARGS: '-B -ntp'
+
+jobs:
+  build:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      # Do not stop the other services when one fails - we want the full picture.
+      fail-fast: false
+      matrix:
+        service: [user-service, product-service, order-service]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          # Caches ~/.m2/repository, keyed on the service's pom.xml.
+          cache: maven
+          cache-dependency-path: services/${{ matrix.service }}/pom.xml
+
+      - name: Build and test
+        working-directory: services/${{ matrix.service }}
+        run: mvn $MAVEN_ARGS verify
+
+      - name: Summarise test results
+        if: always()
+        working-directory: services/${{ matrix.service }}
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, os, xml.etree.ElementTree as ET
+
+          rows, totals = [], [0, 0, 0, 0]
+          for path in sorted(glob.glob("target/surefire-reports/TEST-*.xml")):
+              root = ET.parse(path).getroot()
+              values = [int(root.get(key, 0)) for key in ("tests", "failures", "errors", "skipped")]
+              totals = [a + b for a, b in zip(totals, values)]
+              rows.append("| `%s` | %d | %d | %d | %d |" % (root.get("name"), *values))
+
+          print("### %s\n" % os.environ["SERVICE"])
+          if rows:
+              print("| Test class | Tests | Failures | Errors | Skipped |")
+              print("|---|---:|---:|---:|---:|")
+              print("\n".join(rows))
+              print("\n**Total: %d tests, %d failures, %d errors, %d skipped**" % tuple(totals))
+          else:
+              print("No test results found.")
+          PY
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.service }}
+          path: services/${{ matrix.service }}/target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload jar
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service }}-jar
+          path: services/${{ matrix.service }}/target/*.jar
+          retention-days: 7
+          if-no-files-found: error
+
+  # Single check to require in branch protection: it fails if any matrix leg failed.
+  ci-status:
+    name: CI status
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any service failed
+        run: |
+          echo "build matrix result: ${{ needs.build.result }}"
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "::error::One or more service builds did not succeed."
+            exit 1
+          fi
