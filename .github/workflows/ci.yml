@@ -22,6 +22,7 @@ concurrency:
 env:
   JAVA_VERSION: '17'
   MAVEN_ARGS: '-B -ntp'
+  REGISTRY: ghcr.io
 
 jobs:
   build:
@@ -96,17 +97,91 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # Phase 3: containerise each service from its own multi-stage Dockerfile.
+  # Images are pushed to GHCR only from main and version tags, so a broken
+  # commit on a feature branch can still prove the Dockerfile builds.
+  docker:
+    name: docker (${{ matrix.service }})
+    needs: [build]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [user-service, product-service, order-service]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # GHCR image names must be lowercase; the account name is not.
+      - name: Compute image name
+        run: |
+          slug="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=${REGISTRY}/${slug}/${{ matrix.service }}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build image
+        run: |
+          docker build \
+            --pull \
+            --tag "${IMAGE}:sha-${GITHUB_SHA::7}" \
+            --tag "${IMAGE}:latest" \
+            --file "services/${{ matrix.service }}/Dockerfile" \
+            "services/${{ matrix.service }}"
+
+      # Nothing runs as root in the published image - fail the build if it does.
+      - name: Assert the image does not run as root
+        run: |
+          user="$(docker image inspect "${IMAGE}:sha-${GITHUB_SHA::7}" --format '{{.Config.User}}')"
+          echo "configured user: '${user}'"
+          if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ] || [ "$user" = "0:0" ]; then
+            echo "::error::${{ matrix.service }} image would run as root."
+            exit 1
+          fi
+
+      - name: Push image
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          docker push "${IMAGE}:sha-${GITHUB_SHA::7}"
+          docker push "${IMAGE}:latest"
+
+      - name: Summarise image
+        run: |
+          size="$(docker image inspect "${IMAGE}:sha-${GITHUB_SHA::7}" --format '{{.Size}}')"
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "- tag: \`sha-${GITHUB_SHA::7}\`"
+            echo "- size: $((size / 1024 / 1024)) MB"
+            echo "- user: \`$(docker image inspect "${IMAGE}:sha-${GITHUB_SHA::7}" --format '{{.Config.User}}')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Single check to require in branch protection: it fails if any matrix leg failed.
   ci-status:
     name: CI status
     if: always()
-    needs: [build]
+    needs: [build, docker]
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if any service failed
+      - name: Fail if any job failed
         run: |
           echo "build matrix result: ${{ needs.build.result }}"
+          echo "docker matrix result: ${{ needs.docker.result }}"
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::One or more service builds did not succeed."
+            exit 1
+          fi
+          # The docker job is skipped on pull requests, which is not a failure.
+          if [ "${{ needs.docker.result }}" != "success" ] && [ "${{ needs.docker.result }}" != "skipped" ]; then
+            echo "::error::One or more images did not build."
             exit 1
           fi

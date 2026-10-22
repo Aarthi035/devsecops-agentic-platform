@@ -1,0 +1,7 @@
+# Keep the build context small: never send the local build output or VCS data.
+target/
+.git/
+.gitignore
+.idea/
+*.iml
+*.log

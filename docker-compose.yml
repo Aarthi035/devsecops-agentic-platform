@@ -1,0 +1,54 @@
+# Local development stack: the three services on one bridge network.
+#   docker compose up --build
+# Health checks are inherited from each image's HEALTHCHECK, which calls
+# Spring Boot Actuator /actuator/health/readiness - so order-service only
+# starts once user-service and product-service report healthy.
+name: devsecops-platform
+
+services:
+
+  user-service:
+    build:
+      context: ./services/user-service
+    image: devsecops/user-service:1.0.0
+    ports:
+      - "8081:8081"
+    environment:
+      APP_SEED_ENABLED: "true"
+    networks: [app-net]
+    restart: unless-stopped
+
+  product-service:
+    build:
+      context: ./services/product-service
+    image: devsecops/product-service:1.0.0
+    ports:
+      - "8082:8082"
+    environment:
+      APP_SEED_ENABLED: "true"
+    networks: [app-net]
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./services/order-service
+    image: devsecops/order-service:1.0.0
+    ports:
+      - "8083:8083"
+    environment:
+      APP_SEED_ENABLED: "true"
+      # Container DNS names, not localhost: inside the network each service
+      # is reachable as <service-name>:<port>.
+      USER_SERVICE_URL: http://user-service:8081
+      PRODUCT_SERVICE_URL: http://product-service:8082
+    depends_on:
+      user-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+    networks: [app-net]
+    restart: unless-stopped
+
+networks:
+  app-net:
+    driver: bridge

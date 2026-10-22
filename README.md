@@ -16,7 +16,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 0 | Repo skeleton, README, prerequisites | done |
 | 1 | Microservices app + Git workflow | done |
 | 2 | CI pipeline (build matrix, tests, caching, artifacts) | done |
-| 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | pending |
+| 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | done |
 | 4 | Kubernetes manifests on kind + CD and rollback | pending |
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | pending |
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | pending |
@@ -120,6 +120,7 @@ devsecops-agentic-platform/
 │   ├── order-service/        # calls user-service + product-service
 │   ├── product-service/
 │   └── user-service/
+│                             # each service folder has Dockerfile + .dockerignore (Phase 3)
 ├── terraform/                # namespaces + infra (Phase 5)
 ├── .gitattributes
 ├── .gitignore
@@ -197,23 +198,71 @@ Each service has unit tests (Mockito) and API tests (MockMvc). Integration tests
 
 ---
 
-## CI pipeline (Phase 2)
+## Containers (Phase 3)
+
+Each service has its own **multi-stage** `Dockerfile`:
+
+| Stage | Base image | Purpose |
+|-------|-----------|---------|
+| `build` | `maven:3.9.9-eclipse-temurin-17` | `dependency:go-offline`, then `mvn clean package -Dmaven.test.skip=true` |
+| `runtime` | `eclipse-temurin:17-jre-jammy` | JRE only — no Maven, no sources, no build tools |
+
+The `build` stage is discarded, so none of the ~500 MB toolchain reaches the published image.
+
+Container hardening:
+
+- **Non-root.** `groupadd`/`useradd` create `app` with uid/gid `1001`; the image sets `USER 1001:1001`. CI fails the build if `Config.User` is empty or root.
+- **glibc, not musl.** The runtime base is the Ubuntu `jammy` variant of Temurin; the `alpine` tag does not exec on the local Docker Desktop host.
+- **Layer caching.** `pom.xml` is copied before `src/`, so the dependency layer is reused while only source code changes.
+- **`HEALTHCHECK`** calls `/actuator/health/readiness`, which is what `docker compose` and the Phase 4 Kubernetes probes rely on.
+- **`ENTRYPOINT ["/bin/sh","-c","exec java $JAVA_OPTS -jar /app/app.jar"]`** — the `exec` keeps `java` as PID 1, so `SIGTERM` reaches the JVM and the configured graceful shutdown works.
+- **`.dockerignore`** keeps `target/` and `.git/` out of the build context.
+
+### docker-compose
+
+`docker-compose.yml` runs all three services on one bridge network:
+
+```bash
+docker compose up --build -d
+docker compose ps          # wait for all three to report (healthy)
+```
+
+- `order-service` waits for the other two via `depends_on: condition: service_healthy`, which reads the images' `HEALTHCHECK`.
+- Inside the network each service is reachable as `<service-name>:<port>`, so `order-service` gets `USER_SERVICE_URL=http://user-service:8081` and `PRODUCT_SERVICE_URL=http://product-service:8082` (not `localhost`).
+- No `version:` key — it is obsolete in Compose v2.
+
+### Publish to GHCR
+
+The `docker` job in [`ci.yml`](.github/workflows/ci.yml) builds every image on push to `main`/`dev`/`v*` tags and pushes to GitHub Container Registry only from `main` and version tags:
+
+```
+ghcr.io/aarthi035/devsecops-agentic-platform/user-service:sha-<short-sha>
+ghcr.io/aarthi035/devsecops-agentic-platform/user-service:latest
+```
+
+It authenticates with the built-in `GITHUB_TOKEN` (job-level `permissions: packages: write`), so no long-lived registry secret is stored. Phase 4 consumes these images in Kubernetes.
+
+---
+
+## CI pipeline (Phase 2, extended in Phase 3)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
 | Job | What it does |
 |-----|--------------|
 | `build` (matrix: 3 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
+| `docker` (matrix: 3 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
 | `ci-status` | Single gate for branch protection — fails if **any** matrix leg failed |
 
 Design notes:
 
 - **Matrix, `fail-fast: false`** — the three services are independent Maven projects, so they build in parallel and one failure never hides another.
 - **Caching** — `actions/setup-java` caches `~/.m2/repository` keyed on each service's `pom.xml`, so a dependency change invalidates the cache and a code-only change reuses it.
-- **Artifacts** — `test-reports-<service>` (7 days) and `<service>-jar` (7 days). The jars are what Phase 3's Docker build consumes.
-- **Least privilege** — the workflow declares `permissions: contents: read`; it cannot push, tag or comment.
+- **Artifacts** — `test-reports-<service>` (7 days) and `<service>-jar` (7 days).
+- **Least privilege** — the workflow declares `permissions: contents: read`; only the `docker` job widens that, and only with `packages: write`.
 - **Concurrency** — pushing twice to the same branch cancels the in-flight run instead of queueing.
-- **No third-party actions** beyond `actions/checkout`, `actions/setup-java` and `actions/upload-artifact`, which keeps the supply-chain surface small before Phase 7 starts scanning it.
+- **No third-party actions** beyond `actions/checkout`, `actions/setup-java` and `actions/upload-artifact`, which keeps the supply-chain surface small before Phase 7 starts scanning it. The image build uses plain `docker build`/`docker push` rather than an extra action.
+- **`docker` is skipped on pull requests** and only pushes from `main`/`v*` tags, so feature branches still prove the Dockerfile builds without publishing a moving `latest` tag.
 
 The badge at the top of this README reflects the `main` branch run.
 
