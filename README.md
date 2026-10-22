@@ -371,6 +371,7 @@ The CD workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`packages: 
 | Pods stuck `ImagePullBackOff` on `registry.k8s.io/...` with `TLS handshake timeout` | The node can't reach the CDN. Pull on the host instead (`docker pull <image>`) and `kind load docker-image` it in. |
 | HPA shows `cpu: <unknown>/70%` | metrics-server missing or missing the `--kubelet-insecure-tls` patch. Confirm with `kubectl top pods -n devsecops`. |
 | `kubectl get ingress` has no `ADDRESS` | ingress-nginx is not ready, or the controller pod is not on a node labelled `ingress-ready=true`. |
+| CD fails at `Install kind` | `curl -o ./kind` collides with the repository's `kind/` directory. Download to `/tmp/kind` instead — which is what `cd.yml` does. |
 
 ---
 
