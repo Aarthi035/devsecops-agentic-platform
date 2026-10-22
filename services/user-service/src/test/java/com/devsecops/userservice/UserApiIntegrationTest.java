@@ -44,6 +44,16 @@ class UserApiIntegrationTest {
     }
 
     @Test
+    void createUser_withMalformedJson_returns400() throws Exception {
+        mockMvc.perform(post("/api/users")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{fullName:\"Broken\",\"email\":\"broken@example.com\",\"role\":\"USER\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Malformed JSON request body"));
+    }
+
+    @Test
     void createThenFetchById_returnsCreatedUser() throws Exception {
         MvcResult result = mockMvc.perform(post("/api/users")
                         .contentType(MediaType.APPLICATION_JSON)

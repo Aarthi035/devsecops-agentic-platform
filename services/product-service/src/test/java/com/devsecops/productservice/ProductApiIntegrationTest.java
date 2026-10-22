@@ -47,6 +47,16 @@ class ProductApiIntegrationTest {
     }
 
     @Test
+    void createProduct_withMalformedJson_returns400() throws Exception {
+        mockMvc.perform(post("/api/products")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{name:\"Broken\",\"description\":\"x\",\"price\":1.00,\"stock\":1,\"category\":\"Home\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Malformed JSON request body"));
+    }
+
+    @Test
     void createThenFetchById_returnsCreatedProduct() throws Exception {
         MvcResult result = mockMvc.perform(post("/api/products")
                         .contentType(MediaType.APPLICATION_JSON)

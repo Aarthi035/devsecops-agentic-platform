@@ -49,6 +49,16 @@ class OrderControllerTest {
     }
 
     @Test
+    void createOrder_withMalformedJson_returns400() throws Exception {
+        mockMvc.perform(post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{userId:1,\"productId\":10,\"quantity\":2}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Malformed JSON request body"));
+    }
+
+    @Test
     void createOrder_returns201WithLocation() throws Exception {
         when(orderService.create(any())).thenReturn(sampleOrder());
 
