@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars to override a default. *.tfvars is gitignored, so a
+# personal kubeconfig path never ends up in the repository.
+#
+# kubeconfig_path = "C:/Users/me/.kube/config"
+# kube_context    = "kind-devsecops"
+# namespace       = "devsecops"

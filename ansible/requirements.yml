@@ -1,0 +1,12 @@
+---
+# The single collection the playbooks need: kubernetes.core provides the
+# k8s / k8s_info modules.
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# The version floor keeps out releases old enough to be missing k8s_info's
+# current behaviour; the ceiling is left to ansible-galaxy, which refuses any
+# release whose "requires_ansible" the installed ansible-core does not satisfy.
+collections:
+  - name: kubernetes.core
+    version: ">=4.0.0"

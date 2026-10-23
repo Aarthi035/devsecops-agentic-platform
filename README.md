@@ -19,7 +19,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 2 | CI pipeline (build matrix, tests, caching, artifacts) | done |
 | 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | done |
 | 4 | Kubernetes manifests on kind + CD and rollback | done |
-| 5 | Terraform (namespaces/infra) + Ansible (env config) | pending |
+| 5 | Terraform (namespaces/infra) + Ansible (env config) | done |
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | pending |
 | 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | pending |
 | 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | pending |
@@ -100,9 +100,19 @@ devsecops-agentic-platform/
 ├── .github/
 │   ├── PULL_REQUEST_TEMPLATE.md
 │   └── workflows/            # ci.yml, cd.yml, security.yml (Phase 2+)
-├── ansible/
+├── ansible/                  # Phase 5 - environment config + deployment
 │   ├── inventory/
-│   └── playbooks/
+│   │   ├── group_vars/cluster.yml   # namespace, app_config, Secret values, rollout budget
+│   │   └── hosts.ini                # one implicit localhost on the kind network
+│   ├── playbooks/
+│   │   ├── roles/environment/       # renders ConfigMap + Secret from the inventory
+│   │   ├── roles/deploy/            # applies k8s/*.yaml, waits for the rollout
+│   │   ├── site.yml
+│   │   └── verify.yml               # end-to-end check through the Ingress
+│   ├── Dockerfile                   # Debian-based control node on the kind Docker network
+│   ├── ansible.cfg
+│   ├── requirements.txt             # kubernetes, jsonpatch, ansible-lint
+│   └── requirements.yml             # kubernetes.core collection
 ├── docs/                     # prerequisites, architecture, report outline, demo scripts
 ├── evals/                    # failure scenarios, expected root causes, runner script (Phase 10)
 ├── k8s/                      # Phase 4 - applied in filename order
@@ -128,7 +138,13 @@ devsecops-agentic-platform/
 │   ├── product-service/
 │   └── user-service/
 │                             # each service folder has Dockerfile + .dockerignore (Phase 3)
-├── terraform/                # namespaces + infra (Phase 5)
+├── terraform/                # Phase 5 - namespaces, quota, add-ons
+│   ├── namespace.tf          # Namespace + ResourceQuota + LimitRange
+│   ├── addons.tf             # ingress-nginx + metrics-server Helm releases
+│   ├── variables.tf          # kubeconfig path, namespace, chart pins, quota
+│   ├── versions.tf           # provider + Terraform version constraints
+│   ├── outputs.tf
+│   └── terraform.tfvars.example
 ├── .gitattributes
 ├── .gitignore
 ├── docker-compose.yml        # Phase 3
@@ -415,7 +431,155 @@ The workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`contents: rea
 
 ---
 
-## CI pipeline (Phase 2, extended in Phase 3)
+## Terraform and Ansible (Phase 5)
+
+Phase 4 got the platform running with `kubectl apply` and two `kubectl`-installed add-ons. Phase 5 makes that state **declared** instead of typed: Terraform owns the infrastructure, Ansible owns the environment and the workloads.
+
+| Tool | Owns | Lives in |
+|------|------|----------|
+| Terraform | `Namespace/devsecops`, the `ResourceQuota`/`LimitRange` around it, and the two cluster add-ons (as Helm releases) | [`terraform/`](terraform) |
+| Ansible | The namespace's **contents**: the `ConfigMap`/`Secret` the services read, and the workloads from `k8s/` | [`ansible/`](ansible) |
+
+The split is deliberate: `k8s/00-namespace.yaml` still exists for the plain `kubectl apply -f k8s/` path `cd.yml` uses, but **Terraform is the owner** of that object on the laptop. The two tools never create the same thing.
+
+### Terraform
+
+```bash
+cd terraform
+terraform init
+terraform fmt -check -recursive   # style gate (also run in CI)
+terraform validate
+terraform plan                    # expected: "No changes" once applied
+terraform apply
+```
+
+| File | Contents |
+|------|----------|
+| [`namespace.tf`](terraform/namespace.tf) | `Namespace/devsecops` (labelled `managed-by=terraform`), `ResourceQuota/platform-quota`, `LimitRange/platform-limits` |
+| [`addons.tf`](terraform/addons.tf) | `helm_release.ingress_nginx` (namespace `ingress-nginx`) and `helm_release.metrics_server` (namespace `kube-system`) |
+| [`variables.tf`](terraform/variables.tf) | `kubeconfig_path`, `kube_context`, `namespace`, the two chart pins, the quota and LimitRange numbers |
+| [`versions.tf`](terraform/versions.tf) | Terraform ≥ 1.6, `hashicorp/kubernetes` 2.38.0, `hashicorp/helm` 2.17.0 |
+| [`outputs.tf`](terraform/outputs.tf) | namespace/quota/limitrange names, installed chart versions, and the add-on facts the Phase 4 manifests depend on |
+
+**Chart pins match what `cd.yml` installs**, so the laptop and CI run the same add-ons:
+
+| Add-on | Chart | Controller / image |
+|--------|-------|--------------------|
+| ingress-nginx | `4.11.3` | controller **v1.11.3** (the same tag `cd.yml`'s kind provider manifest pins) |
+| metrics-server | `3.14.0` | **v0.9.0** (what `releases/latest` currently resolves to) |
+
+The chart version is not the controller version: chart 4.11.3 is the release whose `controller.image.tag` is `v1.11.3`. Each pin was verified against that chart's `values.yaml` at its own `helm-chart-*` tag.
+
+Two kind-specific settings are declared in `addons.tf` rather than patched in by hand:
+
+- **`--kubelet-insecure-tls`** on metrics-server — without it the kubelets' self-signed certificates are rejected and every HPA reports `cpu: <unknown>` forever (the Phase 4 lesson).
+- **`updateStrategy = Recreate`** on the ingress-nginx controller. The controller publishes the node's host ports 80/443, so only one Pod can ever run on the single kind node; the chart's default `RollingUpdate` surges a second Pod that stays `Pending` with `didn't have free ports for the requested pod ports`, which also wedges every later `helm upgrade`/`terraform apply`. `Recreate` stops the old Pod first.
+
+#### Adopting the existing cluster
+
+The cluster already existed, so Terraform **imported** the objects instead of recreating them — no downtime, and the running workloads were left alone:
+
+```bash
+terraform import kubernetes_namespace_v1.platform devsecops
+```
+
+The add-ons were the one exception: Phase 4's `kubectl`-installed controller and metrics-server were removed and re-installed as Helm releases at the pinned chart versions, so Terraform (not a stray manifest) owns them from here on. No unrelated container, image, volume or database was touched.
+
+#### The `KUBE_CONFIG_PATH` gotcha
+
+Terraform's `kubernetes`/`helm` providers read the kubeconfig from `var.kubeconfig_path`, then **`KUBE_CONFIG_PATH`**, then `~/.kube/config`. They do **not** read `KUBECONFIG`. On a machine that only sets `KUBECONFIG` (kubectl works, Terraform does not), either set the variable the provider reads or pass the path explicitly:
+
+```powershell
+$env:KUBE_CONFIG_PATH = $env:KUBECONFIG      # or the exported admin.conf path
+terraform apply -var="kubeconfig_path=$env:KUBECONFIG"
+```
+
+State is local and `.gitignore`d (`terraform.tfstate*`, `.terraform/`, `*.tfvars`), so no cluster state or personal kubeconfig path is ever committed. Later phases can move it to a remote backend without touching the resources.
+
+### Ansible
+
+Ansible has no control node on Windows, and kind binds the API server to the host's **loopback** interface only (`6443/tcp -> 127.0.0.1:52084`) — a control node in WSL reaches the host through the WSL gateway IP, which is not `127.0.0.1`, so the API is unreachable from there. [`ansible/Dockerfile`](ansible/Dockerfile) sidesteps that: a **Debian-based** control node **joined to the `kind` Docker network**, using the node's own `admin.conf` (`server: https://devsecops-control-plane:6443`). Inside that network the node answers to its own name, so both the URL and the certificate in `admin.conf` resolve.
+
+```bash
+# Build once.
+docker build -t devsecops/ansible:latest ansible
+
+# Configure the environment and deploy the workloads.
+docker run --rm --network kind \
+  -v "C:/Users/<you>/devsecops-agentic-platform:/workspace" \
+  -v "C:/Users/<you>/AppData/Local/Temp/ds-iac/admin.conf:/root/.kube/config:ro" \
+  --workdir /workspace/ansible \
+  devsecops/ansible:latest -i inventory/hosts.ini playbooks/site.yml
+
+# Verify the result end to end through the same Ingress.
+docker run --rm --network kind -v ... --workdir /workspace/ansible \
+  devsecops/ansible:latest -i inventory/hosts.ini playbooks/verify.yml
+```
+
+- `admin.conf` is the node's kubeconfig and contains a client certificate, so it is kept **outside the repository** (in `%TEMP%`) and mounted read-only. It is never committed.
+- The inventory is passed with `-i` on the command line because a Windows bind mount presents the directory as world-writable, and **Ansible skips `ansible.cfg` in a world-writable directory**. Nothing else in the run depends on that file.
+- The repository root is mounted at `/workspace` (not just `ansible/`), because the deploy role applies the sibling `k8s/` manifests.
+- Debian, not Alpine: musl-based images fail to exec on this Docker Desktop with `exec format error` — the same reason the service images are Debian-based.
+
+| Piece | Contents |
+|-------|----------|
+| [`inventory/hosts.ini`](ansible/inventory/hosts.ini) | One implicit `localhost` with `ansible_connection=local` — there is no remote host and no SSH credential |
+| [`inventory/group_vars/cluster.yml`](ansible/inventory/group_vars/cluster.yml) | `platform_namespace`, the `app_config` keys (same as `k8s/10-configmap.yaml`), the `app_credentials` hook (empty), the rollout budget, the Ingress base URL |
+| [`playbooks/roles/environment`](ansible/playbooks/roles/environment/tasks/main.yml) | Renders `ConfigMap/app-config` and `Secret/app-credentials` from the inventory with the `k8s` module — so changing environment is a data change, not a code change |
+| [`playbooks/roles/deploy`](ansible/playbooks/roles/deploy/tasks/main.yml) | Asserts the namespace exists (Terraform's object), applies every non-owned manifest from `k8s/`, waits for all Deployments to become available |
+| [`playbooks/site.yml`](ansible/playbooks/site.yml) | Runs `environment` then `deploy` |
+| [`playbooks/verify.yml`](ansible/playbooks/verify.yml) | The same three smoke calls `cd.yml` makes, through the same Ingress, all retried |
+
+Both roles are **idempotent** — a second run reports `changed=0`. Ansible applies the `k8s/` YAML rather than restating it, so the Deployments, HPAs and Ingress cannot drift from what `cd.yml` deploys. The three files Ansible does *not* own are skipped: `00-namespace.yaml` (Terraform's), and `10-configmap.yaml` / `11-secret.yaml` (rendered by the `environment` role).
+
+### CI
+
+The `iac` job in [`ci.yml`](.github/workflows/ci.yml) gates the same checks CI runs everywhere else, so a broken plan or a mistyped playbook fails the pipeline instead of the laptop:
+
+| Step | Command |
+|------|---------|
+| Terraform format | `terraform fmt -check -recursive` |
+| Terraform init (no backend) | `terraform init -backend=false` |
+| Terraform validate | `terraform validate` |
+| Ansible syntax | `ansible-playbook --syntax-check` on `site.yml` and `verify.yml` |
+| Ansible lint | `ansible-lint` (profile `min`) |
+
+The job runs against no cluster — `-backend=false` plus `validate` needs only the providers — so it is fast and deterministic. `cd.yml` is intentionally unchanged: it keeps installing the add-ons on its throwaway runner cluster with `kubectl`, which is correct for a cluster that only exists for the length of a job.
+
+### What has actually been tested
+
+Verified on this laptop (Terraform 1.16.6, ansible-core 2.18.19, `kubernetes.core` 6.6.0, ansible-lint 26.10.1):
+
+| Check | Result |
+|-------|--------|
+| `terraform fmt -check -recursive` | exit 0 |
+| `terraform validate` | `Success! The configuration is valid.` |
+| `terraform plan -detailed-exitcode` | exit 0 — `No changes. Your infrastructure matches the configuration.` (idempotent) |
+| Adoption | `terraform import kubernetes_namespace_v1.platform devsecops` adopted the live namespace; the three Deployments kept serving throughout |
+| Namespace guardrails | `ResourceQuota/platform-quota` and `LimitRange/platform-limits` present; namespace labelled `app.kubernetes.io/managed-by=terraform` |
+| ingress-nginx | controller image **v1.11.3**, `STRATEGY=Recreate`, `READY 1`; default backend `Running` |
+| metrics-server | image **v0.9.0**, `--kubelet-insecure-tls` set, `apiservice v1beta1.metrics.k8s.io` `AVAILABLE=True` |
+| Ansible `site.yml` | `ok=8 changed=0 failed=0` on a re-run: namespace assert passed, ConfigMap/Secret rendered, 5 workloads applied (3 owned-elsewhere files skipped), every Deployment available |
+| Ansible `verify.yml` | `ok=5 failed=0`: `GET /api/users`, `GET /api/products` and `POST /api/orders` all succeeded through `http://devsecops-control-plane`; the order returned `CREATED` |
+| Ingress from the host | `Invoke-WebRequest http://localhost:8090/api/products` returns all 6 seeded products |
+| HPA has real numbers | `kubectl get hpa -n devsecops` → `cpu: 2%/70%`; `kubectl top pods -n devsecops` returns real CPU/memory |
+| `ansible-lint` | `Passed: 0 failure(s), 0 warning(s) … Profile 'min' was required, but 'production' profile passed.` |
+| `--syntax-check` | exit 0 for both `site.yml` and `verify.yml` |
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `terraform import`/`plan` fails with `Get "http://localhost/api/v1/...": connection refused` | The provider reads `KUBE_CONFIG_PATH`, not `KUBECONFIG`. Set `$env:KUBE_CONFIG_PATH` (or pass `-var="kubeconfig_path=..."`). |
+| ingress-nginx upgrade leaves the new controller Pod `Pending` with `didn't have free ports for the requested pod ports` | hostPort 80/443 held by the old Pod under the chart's default `RollingUpdate` on a single node. `addons.tf` sets `updateStrategy = { type = "Recreate" }`; for an already-wedged release, patch the Deployment's strategy to `Recreate` and let it converge. |
+| Ansible can't reach the API server (`https://devsecops-control-plane:6443` times out) | The container is not on the kind network. Run it with `--network kind`. |
+| `ansible-playbook` seems to ignore `ansible.cfg` | It does — Ansible skips that file in a world-writable directory (how a Windows mount presents the repo). Pass `-i inventory/hosts.ini` on the command line. |
+| The `deploy` role fails iterating over single characters (`item=s`) | `lookup('fileglob', ...)` returns a comma-joined **string**; `| sort` then splits it into characters. Use `query(...)` (i.e. `lookup(..., wantlist=True)`) to get a real list. |
+| `terraform plan` still shows changes after `apply` | The live object drifted from the file (a manual `kubectl edit`, or an add-on installed by a different path). Either adopt it with `terraform import` or let `apply` reconcile — check `plan` output first. |
+
+---
+
+## CI pipeline (Phase 2, extended in Phases 3 and 5)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
@@ -423,7 +587,8 @@ The workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`contents: rea
 |-----|--------------|
 | `build` (matrix: 3 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
 | `docker` (matrix: 3 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
-| `ci-status` | Single gate for branch protection — fails if **any** matrix leg failed |
+| `iac` | Phase 5 — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, then `ansible-playbook --syntax-check` and `ansible-lint` on both playbooks. Runs against no cluster |
+| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker` or `iac` failed |
 
 Design notes:
 
@@ -432,8 +597,9 @@ Design notes:
 - **Artifacts** — `test-reports-<service>` (7 days) and `<service>-jar` (7 days).
 - **Least privilege** — the workflow declares `permissions: contents: read`; only the `docker` job widens that, and only with `packages: write`.
 - **Concurrency** — pushing twice to the same branch cancels the in-flight run instead of queueing.
-- **No third-party actions** beyond `actions/checkout`, `actions/setup-java` and `actions/upload-artifact`, which keeps the supply-chain surface small before Phase 7 starts scanning it. The image build uses plain `docker build`/`docker push` rather than an extra action.
+- **No third-party actions** beyond `actions/checkout`, `actions/setup-java`, `actions/upload-artifact`, and — for the `iac` job — `hashicorp/setup-terraform` and `actions/setup-python`, which keeps the supply-chain surface small before Phase 7 starts scanning it. The image build uses plain `docker build`/`docker push` rather than an extra action.
 - **`docker` is skipped on pull requests** and only pushes from `main`/`v*` tags, so feature branches still prove the Dockerfile builds without publishing a moving `latest` tag.
+- **`iac` needs no cluster.** `terraform init -backend=false` plus `validate` only needs the providers, and `--syntax-check`/`ansible-lint` only read the playbooks, so the job is fast and deterministic and never depends on a live API server. The `ansible` toolchain is pinned by [`ansible/requirements.txt`](ansible/requirements.txt) and [`ansible/requirements.yml`](ansible/requirements.yml), the same files the local container image installs from — so CI lints with the same versions as the laptop.
 
 The badge at the top of this README reflects the `main` branch run.
 

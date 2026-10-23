@@ -1,0 +1,74 @@
+---
+# The workloads.
+#
+# The manifests in ../../k8s are the single source of truth - Ansible applies
+# the files rather than restating them in YAML here, so the Deployments,
+# Services, HPAs and Ingress cannot drift from what cd.yml deploys with kubectl.
+#
+# Three files are skipped because Ansible is not their owner:
+#   * 00-namespace.yaml     - Terraform's object
+#   * 10-configmap.yaml     - the environment role renders it from the inventory
+#   * 11-secret.yaml        - same
+
+- name: Look up the namespace Terraform created
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ platform_namespace }}"
+  register: platform_namespace_info
+
+# Failing here with a clear message beats the alternative: the k8s module's own
+# error for "no such namespace" is a wall of JSON that does not say who should
+# have created it.
+- name: Require the namespace to exist before deploying into it
+  ansible.builtin.assert:
+    that:
+      - platform_namespace_info.resources | length == 1
+    fail_msg: >-
+      Namespace '{{ platform_namespace }}' does not exist. Terraform owns it -
+      run "terraform apply" in ../terraform, or "kubectl apply -f
+      ../k8s/00-namespace.yaml" if you are not using Terraform.
+    success_msg: "Namespace '{{ platform_namespace }}' is present."
+
+# query() is lookup(..., wantlist=True): it returns a real list of paths.
+# lookup() on its own returns a comma-joined string, which "| sort" would then
+# turn into a list of single characters.
+- name: Find every manifest in the k8s directory
+  ansible.builtin.set_fact:
+    platform_manifests: "{{ query('ansible.builtin.fileglob', k8s_dir ~ '/*.yaml') | sort }}"
+
+- name: Apply the workload manifests
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: "{{ platform_manifests }}"
+  when: (item | basename) not in k8s_owned_elsewhere
+  loop_control:
+    label: "{{ item | basename }}"
+
+# "kubectl wait --for=condition=available deployment --all" by hand: every
+# Deployment in the namespace must have as many available replicas as it asked
+# for. This is the same five-minute budget cd.yml waits out.
+#
+# `map(attribute=...)` walks the dotted path into each resource, and the lists
+# compare equal only when every Deployment is fully rolled out.
+- name: Wait for every Deployment to become available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ platform_namespace }}"
+  register: platform_deployments
+  changed_when: false
+  until: >-
+    (platform_deployments.resources | length) > 0 and
+    (platform_deployments.resources | map(attribute='spec.replicas', default=1) | list)
+    == (platform_deployments.resources | map(attribute='status.availableReplicas', default=0) | list)
+  retries: "{{ rollout_retries }}"
+  delay: "{{ rollout_delay }}"
+
+- name: Report what is running
+  ansible.builtin.debug:
+    msg: >-
+      {{ platform_deployments.resources | length }} Deployment(s) available in
+      '{{ platform_namespace }}':
+      {{ platform_deployments.resources | map(attribute='metadata.name') | list | join(', ') }}

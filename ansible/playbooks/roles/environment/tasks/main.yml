@@ -1,0 +1,47 @@
+---
+# The platform's environment, rendered from the inventory.
+#
+# Both objects are created with the k8s module from a definition built out of
+# variables rather than applied from a file, which is the whole difference
+# between this and "kubectl apply -f ../k8s/":
+#   * the values live in inventory/group_vars/cluster.yml, so the same playbook
+#     targets a different environment by changing data, not code;
+#   * the run is idempotent - the module diffs the object and only writes when
+#     something actually changed.
+#
+# The Deployments consume both with "envFrom", so nothing has to be restarted
+# by hand: a changed ConfigMap makes the kubelet re-sync the environment, and
+# the next pod start picks it up.
+
+- name: Render the shared environment ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: app-config
+        namespace: "{{ platform_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: devsecops-platform
+          app.kubernetes.io/managed-by: ansible
+      data: "{{ app_config }}"
+
+# Empty by default (see group_vars). The task is written so that filling the
+# variable in is all it takes - and so that no_log only kicks in once there is
+# actually a value worth hiding from the console and the CI log.
+- name: Render the credentials Secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: app-credentials
+        namespace: "{{ platform_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: devsecops-platform
+          app.kubernetes.io/managed-by: ansible
+      type: Opaque
+      stringData: "{{ app_credentials }}"
+  no_log: "{{ app_credentials | length > 0 }}"

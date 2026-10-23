@@ -1,0 +1,13 @@
+# Python packages the kubernetes.core collection drives, plus the linter.
+#
+#   pip install -r requirements.txt
+#
+# "kubernetes" is the official client the collection uses to talk to the API
+# server; "jsonpatch" is what its JSON-patch strategies need.
+#
+# "ansible-lint" is the lint step the "iac" job in .github/workflows/ci.yml
+# runs. It is pinned by the same file so the container and CI lint with the
+# same version - see ../ansible/.ansible-lint for the profile.
+kubernetes>=24.2.0
+jsonpatch>=1.32
+ansible-lint>=24.2.0

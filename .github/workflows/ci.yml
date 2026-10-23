@@ -165,17 +165,82 @@ jobs:
             echo "- user: \`$(docker image inspect "${IMAGE}:sha-${GITHUB_SHA::7}" --format '{{.Config.User}}')\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Phase 5: the infrastructure is code, so it gets the same treatment as the
+  # services. Terraform must be formatted and valid, and the Ansible playbooks
+  # must pass a syntax check and the lint profile in ansible/.ansible-lint.
+  #
+  # Nothing here talks to a cluster: "terraform init -backend=false" installs
+  # the providers without configuring a backend, and "validate" only checks the
+  # configuration against them. Ansible is run with --syntax-check and
+  # ansible-lint, neither of which connects anywhere. cd.yml stays the only
+  # workflow that touches a real cluster.
+  iac:
+    name: IaC (terraform, ansible)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # Pinned to the version the laptop cluster was verified against
+          # (terraform version on Windows), so a formatting or validation
+          # result means the same thing in both places.
+          terraform_version: '1.16.6'
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      # -backend=false: local state is gitignored, and validate does not need it.
+      - name: terraform init
+        working-directory: terraform
+        run: terraform init -backend=false -input=false -no-color
+
+      - name: terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ansible/requirements.txt
+
+      - name: Install Ansible
+        run: |
+          pip install --disable-pip-version-check "ansible-core>=2.16,<2.19" -r ansible/requirements.txt
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Ansible syntax check
+        working-directory: ansible
+        run: |
+          ansible-playbook -i inventory/hosts.ini playbooks/site.yml --syntax-check
+          ansible-playbook -i inventory/hosts.ini playbooks/verify.yml --syntax-check
+
+      # Reads .ansible-lint (profile: min). The inventory is not needed: lint
+      # only parses, it does not run anything.
+      - name: Ansible lint
+        working-directory: ansible
+        run: ansible-lint
+
   # Single check to require in branch protection: it fails if any matrix leg failed.
   ci-status:
     name: CI status
     if: always()
-    needs: [build, docker]
+    needs: [build, docker, iac]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed
         run: |
           echo "build matrix result: ${{ needs.build.result }}"
           echo "docker matrix result: ${{ needs.docker.result }}"
+          echo "iac result: ${{ needs.iac.result }}"
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::One or more service builds did not succeed."
             exit 1
@@ -183,5 +248,9 @@ jobs:
           # The docker job is skipped on pull requests, which is not a failure.
           if [ "${{ needs.docker.result }}" != "success" ] && [ "${{ needs.docker.result }}" != "skipped" ]; then
             echo "::error::One or more images did not build."
+            exit 1
+          fi
+          if [ "${{ needs.iac.result }}" != "success" ]; then
+            echo "::error::The Terraform or Ansible checks did not succeed."
             exit 1
           fi

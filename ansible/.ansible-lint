@@ -1,0 +1,10 @@
+---
+# "min" is ansible-lint's correctness profile: it fails on things that break a
+# run (missing task names, undefined variables, invalid module arguments) but
+# not on the stylistic rules of the stricter "production" profile, which would
+# drown a project this size in noise.
+profile: min
+
+# Anything ansible-galaxy or ansible-lint writes locally.
+exclude_paths:
+  - .cache/

@@ -1,0 +1,81 @@
+---
+# End-to-end check of what site.yml deployed.
+#
+#   ansible-playbook -i inventory/hosts.ini playbooks/verify.yml
+#
+# It makes the same three calls cd.yml's smoke test makes, through the same
+# Ingress, so a green run here means the same thing as a green deploy: the
+# routes resolve, and order-service can reach user-service and product-service
+# over in-cluster DNS to create an order.
+#
+# Every call is retried. Straight after a rollout the Ingress can answer 502
+# for a moment while the new pod's endpoint propagates - the Phase 4 lesson,
+# and the reason a single attempt is not a fair test.
+
+- name: Verify the platform end to end
+  hosts: cluster
+  gather_facts: false
+
+  tasks:
+    - name: Every Deployment in the namespace must be available
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ platform_namespace }}"
+      register: verified_deployments
+      changed_when: false
+      until: >-
+        (verified_deployments.resources | length) > 0 and
+        (verified_deployments.resources | map(attribute='spec.replicas', default=1) | list)
+        == (verified_deployments.resources | map(attribute='status.availableReplicas', default=0) | list)
+      retries: "{{ rollout_retries }}"
+      delay: "{{ rollout_delay }}"
+
+    - name: List the seeded user through the Ingress
+      ansible.builtin.uri:
+        url: "{{ ingress_base_url }}/api/users"
+        return_content: true
+      register: verified_users
+      changed_when: false
+      until: >-
+        (verified_users.status | default(0)) == 200 and
+        'aarthi@example.com' in (verified_users.content | default(''))
+      retries: 12
+      delay: 5
+
+    - name: List the seeded product through the Ingress
+      ansible.builtin.uri:
+        url: "{{ ingress_base_url }}/api/products"
+        return_content: true
+      register: verified_products
+      changed_when: false
+      until: (verified_products.status | default(0)) == 200 and (verified_products.content | default('') | length) > 2
+      retries: 12
+      delay: 5
+
+    - name: Create an order through the Ingress
+      ansible.builtin.uri:
+        url: "{{ ingress_base_url }}/api/orders"
+        method: POST
+        body_format: json
+        body:
+          userId: 1
+          productId: 1
+          quantity: 2
+        status_code: 201
+        return_content: true
+      register: verified_order
+      changed_when: false
+      until: >-
+        (verified_order.status | default(0)) == 201 and
+        '"status":"CREATED"' in (verified_order.content | default(''))
+      retries: 12
+      delay: 5
+
+    - name: Report the verified result
+      ansible.builtin.debug:
+        msg: >-
+          {{ verified_deployments.resources | length }} Deployment(s) available;
+          GET /api/users, GET /api/products and POST /api/orders all succeeded
+          through {{ ingress_base_url }}; the order came back with
+          status CREATED.

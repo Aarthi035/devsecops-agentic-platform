@@ -1,0 +1,28 @@
+---
+# Phase 5 - Ansible.
+#
+# Where Terraform stops, Ansible starts. Terraform owns the *infrastructure*:
+# the namespace, the ResourceQuota/LimitRange around it and the two cluster
+# add-ons. Ansible owns the namespace's *contents*: the environment the
+# services read at startup, and the workloads themselves.
+#
+#   ansible-playbook -i inventory/hosts.ini playbooks/site.yml
+#
+# Run it from the ansible/ directory. The roles are in playbooks/roles/, which
+# Ansible finds next to the playbook, so the run does not depend on ansible.cfg
+# being read (Ansible skips that file in a world-writable directory, which is
+# how a Windows mount presents this repository).
+#
+# Both roles are idempotent: a second run reports no changes unless something
+# really drifted. Run playbooks/verify.yml afterwards to check the result end
+# to end through the Ingress.
+
+- name: Configure the platform environment and deploy the services
+  hosts: cluster
+  gather_facts: false
+
+  roles:
+    - role: environment
+      tags: [environment]
+    - role: deploy
+      tags: [deploy]

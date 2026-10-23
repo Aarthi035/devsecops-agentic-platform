@@ -1,0 +1,55 @@
+---
+# Everything the playbooks need to know about *this* environment. Keeping it
+# here rather than in the playbooks is the point of the Phase 5 Ansible half:
+# moving to another cluster or another set of service URLs is an inventory
+# change, not a code change.
+
+# Owned by Terraform (terraform/namespace.tf). Ansible deploys into it and
+# never creates it, so the two tools cannot fight over the same object.
+platform_namespace: devsecops
+
+# The non-secret environment every service reads with "envFrom".
+#
+# These are the same keys and values as ../k8s/10-configmap.yaml. That file is
+# the hand-written equivalent used by the plain "kubectl apply -f k8s/" path in
+# cd.yml; this variable is the Ansible-managed source of truth. Service URLs are
+# in-cluster DNS names - "localhost" would resolve to whichever pod asked.
+app_config:
+  APP_SEED_ENABLED: "true"
+  USER_SERVICE_URL: "http://user-service:8081"
+  PRODUCT_SERVICE_URL: "http://product-service:8082"
+
+# ../k8s/11-secret.yaml ships an empty Secret on purpose, and this mirrors it.
+# The local datastores are in-memory H2 on the default "sa" account with no
+# password, so there is no real credential to hold - and committing one is
+# exactly what the Phase 7 gitleaks scan exists to catch.
+#
+# This is the hook for a real deployment: put the values in an encrypted vault
+# (ansible-vault) or pull them from the CI secret store, and the Secret the
+# services read is filled in without touching a single task.
+app_credentials: {}
+
+# The manifests, addressed from wherever this playbook is being run rather than
+# from the current directory. playbook_dir is <repo>/ansible/playbooks, so two
+# dirnames up is <repo>, where k8s/ lives.
+k8s_dir: "{{ playbook_dir | dirname | dirname }}/k8s"
+
+# Ansible is not the only owner of ../k8s, so these files are skipped when it
+# applies the directory:
+#   * 00-namespace.yaml - Terraform's object
+#   * 10-configmap.yaml / 11-secret.yaml - rendered from the two variables above
+k8s_owned_elsewhere:
+  - 00-namespace.yaml
+  - 10-configmap.yaml
+  - 11-secret.yaml
+
+# Rollout budget for the "wait for available" task: 60 retries, 5s apart, the
+# same five minutes cd.yml allows.
+rollout_retries: 60
+rollout_delay: 5
+
+# Where the Ingress answers from the control node. On the kind network that is
+# the node container by name; the very same Ingress is on
+# http://localhost:8090 from the Windows host, because kind maps node port 80
+# to host port 8090 (kind/kind-config.yaml).
+ingress_base_url: "http://devsecops-control-plane"
