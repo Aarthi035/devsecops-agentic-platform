@@ -372,9 +372,15 @@ Verified on this laptop (Docker Engine 28.0.4, kind v0.33.0, kubectl v1.32.2, no
 | Rolling update | `kubectl set image` to an immutable `sha-<commit>` tag rolls out and becomes Ready |
 | Rollback | `kubectl rollout undo` returns the Deployment to the previous revision and the API keeps answering |
 
-Verified on GitHub Actions: the CI build/docker matrices and the combined `CI status` job.
+Verified on GitHub Actions: the CI build/docker matrices, the combined `CI status` job, and the **whole CD deploy** — run
+[39993077886](https://github.com/Aarthi035/devsecops-agentic-platform/actions/runs/39993077886) for commit `af3d0a9`
+created the kind cluster, brought both add-ons to `condition met`, pulled the images by `sha-af3d0a9` from GHCR, applied
+`k8s/`, pinned all three Deployments to `devsecops/<service>:sha-af3d0a9`, waited out the rollout and passed the Ingress
+smoke test (all three endpoints `ok (attempt 1)`, `POST /api/orders` → `"status":"CREATED"`). The CD runs triggered by that
+commit's `dev` CI run were reported **skipped**, not failed, which is the branch filter working as intended.
 
-Not verified, and not claimed: a remote (cloud) cluster — the project runs locally by design and no remote kubeconfig exists; and NetworkPolicies/RBAC, which arrive in Phase 7.
+Not verified, and not claimed: a remote (cloud) cluster — the project runs locally by design and no remote kubeconfig
+exists, so `cd.yml` targets a throwaway kind cluster on the runner only; and NetworkPolicies/RBAC, which arrive in Phase 7.
 
 ### CD
 
