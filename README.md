@@ -356,11 +356,43 @@ kubectl rollout status deployment/user-service -n devsecops --timeout=120s
 
 `revisionHistoryLimit: 5` keeps the last five ReplicaSets, so `kubectl rollout history` / `rollout undo` work for the last few deploys.
 
+### What has actually been tested
+
+Verified on this laptop (Docker Engine 28.0.4, kind v0.33.0, kubectl v1.32.2, node `kindest/node:v1.33.12`):
+
+| Check | Result |
+|-------|--------|
+| Cluster and add-ons | 1 node `Ready`; ingress-nginx controller and metrics-server `Available` |
+| Deployments | all three `1/1` Ready, `devsecops/<service>:1.0.0` |
+| Non-root | `kubectl exec deploy/user-service -- id` → `uid=1001(app) gid=1001(app)` |
+| Ingress routing | `curl http://localhost:8090/api/users` and `/api/products` return the seeded data |
+| Inter-service REST | `POST /api/orders` returns **201** with `"status":"CREATED"` and the price snapshot, so order-service reached both other Services by DNS name; `POST /api/orders/1/confirm` → `CONFIRMED` |
+| Probes | pods stay `1/1` Ready. `kubectl get events --field-selector reason=Unhealthy` shows transient startup-probe `connection refused` while the JVM boots — that is the startup probe doing its job — and **zero** liveness-probe failures. The single `RESTARTS 1` each pod shows is the Docker Desktop restart, not a probe kill. |
+| HPA | `kubectl top pods` and `kubectl get hpa` report real CPU (no `cpu: <unknown>`) |
+| Rolling update | `kubectl set image` to an immutable `sha-<commit>` tag rolls out and becomes Ready |
+| Rollback | `kubectl rollout undo` returns the Deployment to the previous revision and the API keeps answering |
+
+Verified on GitHub Actions: the CI build/docker matrices and the combined `CI status` job.
+
+Not verified, and not claimed: a remote (cloud) cluster — the project runs locally by design and no remote kubeconfig exists; and NetworkPolicies/RBAC, which arrive in Phase 7.
+
 ### CD
 
-[`.github/workflows/cd.yml`](.github/workflows/cd.yml) triggers on a **successful** `CI` run (and on manual dispatch). It installs kind on the runner, creates a cluster from the same `kind/kind-config.yaml`, installs both add-ons, pulls the published images from GHCR, retags them to the names the manifests expect, applies `k8s/`, waits for the rollout, and then smoke-tests `/api/users`, `/api/products` and `POST /api/orders` through the Ingress on port 8090. Any failure runs the **rollback** step: `kubectl rollout undo` for every Deployment, then a diagnostics dump.
+[`.github/workflows/cd.yml`](.github/workflows/cd.yml) triggers when a **CI** run completes, and deploys only when that run succeeded **on `main`** — the only place `ci.yml` publishes images. A manual `workflow_dispatch` always runs, so a deploy can be repeated on demand. `dev`, `feature/**` and pull-request runs are skipped rather than failed: they never publish the tags this workflow deploys.
 
-The CD workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`packages: read`).
+A run then:
+
+1. checks out the exact commit CI validated (`github.event.workflow_run.head_sha`, not the branch tip),
+2. installs kind on the runner and creates a cluster from the same `kind/kind-config.yaml`,
+3. installs both add-ons with the same commands used on the laptop,
+4. pulls the images **by immutable tag** from GHCR — `sha-<commit>` — and loads them into the node,
+5. applies `k8s/`, then pins each Deployment to that tag with `kubectl set image`, so the live revision names the commit it runs,
+6. waits for the rollout and prints the image each Deployment ended up on,
+7. smoke-tests `/api/users`, `/api/products` and `POST /api/orders` through the Ingress on port 8090. Every call is retried (12 attempts, 5 s apart), because the Ingress can answer `502` for a moment right after a rollout, and a single late call must not roll back a healthy deploy.
+
+Any failure runs the **rollback** step: `kubectl rollout undo` for every Deployment, then a diagnostics dump (`kubectl describe pods`). Note that the very first deploy of a fresh cluster has only one revision, so there `rollout undo` is a no-op and the diagnostics are what tell you what went wrong.
+
+The workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`contents: read`, `packages: read`): no kubeconfig and no cluster credential is stored in the repository or printed in the logs.
 
 ### Troubleshooting
 
@@ -371,6 +403,8 @@ The CD workflow needs no secrets beyond the built-in `GITHUB_TOKEN` (`packages: 
 | Pods stuck `ImagePullBackOff` on `registry.k8s.io/...` with `TLS handshake timeout` | The node can't reach the CDN. Pull on the host instead (`docker pull <image>`) and `kind load docker-image` it in. |
 | HPA shows `cpu: <unknown>/70%` | metrics-server missing or missing the `--kubelet-insecure-tls` patch. Confirm with `kubectl top pods -n devsecops`. |
 | `kubectl get ingress` has no `ADDRESS` | ingress-nginx is not ready, or the controller pod is not on a node labelled `ingress-ready=true`. |
+| CD fails seconds after `kubectl apply` of ingress-nginx with `error: no matching resources found` | `kubectl wait --for=... pod --selector=...` fails immediately when no Pod matches yet, and the controller's Pods do not exist for the first seconds after the apply. Wait on the Deployment's `Available` condition instead — which is what `cd.yml` now does. |
+| Right after a rollout the Ingress answers `502` for a second or two | The Service endpoint is still propagating. Retry rather than treat it as failure: `cd.yml` retries every smoke-test call, so a healthy deploy is not rolled back on one transient `502`. |
 | CD fails at `Install kind` | `curl -o ./kind` collides with the repository's `kind/` directory. Download to `/tmp/kind` instead — which is what `cd.yml` does. |
 
 ---
