@@ -5,6 +5,11 @@ output "namespace" {
   value       = kubernetes_namespace_v1.platform.metadata[0].name
 }
 
+output "monitoring_namespace" {
+  description = "Namespace holding the Phase 6 observability stack."
+  value       = kubernetes_namespace_v1.monitoring.metadata[0].name
+}
+
 output "resource_quota" {
   description = "Name of the namespace ResourceQuota."
   value       = kubernetes_resource_quota_v1.platform.metadata[0].name

@@ -1,0 +1,46 @@
+# Promtail's identity and the one permission it needs.
+#
+# Promtail discovers log files through the Kubernetes API: it lists and watches
+# Pods to learn each pod's uid and container names, which is how it builds the
+# /var/log/pods/<uid>/<container>/*.log path. That is read-only, cluster-wide
+# information - pods live in every namespace - so this is a ClusterRole and a
+# ClusterRoleBinding rather than a namespaced pair.
+#
+# Note what is NOT granted: no secrets, no configmaps, no exec, nothing
+# writeable. Phase 7 reviews this against the pod-security story.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devsecops-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: promtail
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devsecops-platform
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: promtail
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devsecops-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: promtail
+subjects:
+  - kind: ServiceAccount
+    name: promtail
+    namespace: monitoring

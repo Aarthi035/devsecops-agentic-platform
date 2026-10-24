@@ -1,0 +1,152 @@
+# Grafana: one replica, everything provisioned from ConfigMaps.
+#
+# Datasources, the dashboard *provider* and the dashboard *JSON* are all mounted
+# from ConfigMaps, so a fresh Pod comes up with Prometheus and Loki already
+# wired and the platform dashboard already loaded - no clicking, and no drift
+# between what is in git and what is in the running Grafana.
+#
+# The dashboard mount is nested inside the storage mount: the emptyDir at
+# /var/lib/grafana holds grafana.db and plugins, and the ConfigMap shadows only
+# the dashboards/ subdirectory of it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  replicas: 1
+  strategy:
+    # Grafana's sqlite database lives in the emptyDir, so it dies with the Pod.
+    # Recreate avoids a window where the old and new Pod both write a database
+    # that is about to disappear.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: devsecops-platform
+      annotations:
+        # Bump these when the matching ConfigMap changes so a rollout happens.
+        checksum/datasources: "grafana-datasources-v1"
+        checksum/dashboards: "grafana-dashboards-v1"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 472 is the uid the official image ships and expects to own /var/lib/grafana.
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.4
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            # Optional: with no "grafana-admin" Secret present Grafana falls
+            # back to its documented default password (admin). Create the
+            # Secret to override it - the same hook Phase 5 uses for
+            # app-credentials, so no credential is ever committed here.
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: admin-password
+                  optional: true
+            # Grafana is reached through the Ingress at /grafana, so it has to
+            # build its links under that prefix. Pairing root_url with
+            # serve_from_sub_path is what makes the UI work behind the Ingress
+            # without any path rewriting there.
+            - name: GF_SERVER_ROOT_URL
+              value: http://localhost:8090/grafana/
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+          # With serve_from_sub_path the health endpoint moves under /grafana too.
+          readinessProbe:
+            httpGet:
+              path: /grafana/api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /grafana/api/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: provisioning-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: provisioning-dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/grafana
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: provisioning-datasources
+          configMap:
+            name: grafana-datasources
+        - name: provisioning-dashboards
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: storage
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,9 @@
+# Python packages the "Monitoring config" job in .github/workflows/ci.yml needs.
+#
+#   pip install -r requirements.txt
+#
+# PyYAML is the only one: check-monitoring.py parses monitoring/*.yaml and the
+# Prometheus rule bodies inside the ConfigMaps with it, and the runner's Python
+# does not ship it. The lower bound matches what the ansible/ container already
+# has, so a local run and a CI run parse the manifests the same way.
+PyYAML>=6.0

@@ -1,0 +1,75 @@
+# Promtail: the log shipper.
+#
+# It runs as a DaemonSet so every node's /var/log/pods is read locally, which is
+# what makes container logs available under the "namespace"/"pod"/"container"
+# labels Loki queries with.
+#
+# TRIM: only three namespaces are shipped. The kind node also runs kube-system
+# (kubelet, coredns, metrics-server...), and those logs are noise for this
+# project.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 9080
+      log_level: warn
+
+    # Where the "which line did I last read" cursor is kept. The emptyDir is
+    # mounted at /run/promtail by the DaemonSet; without a cursor a restart
+    # re-ships the whole log file.
+    positions:
+      filename: /run/promtail/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+
+        pipeline_stages:
+          # The node's container runtime is containerd, so every log line is
+          # already in CRI format: "<timestamp> <stream> <flags> <message>".
+          # This stage strips that envelope instead of shipping it as part of
+          # the message, and (critically) joins lines that were split by the
+          # runtime's own 16 KiB limit.
+          - cri: {}
+
+        relabel_configs:
+          # Only pods that are actually running have a log file.
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+
+          # Only the namespaces this project owns.
+          - source_labels: [__meta_kubernetes_namespace]
+            regex: devsecops|monitoring|ingress-nginx
+            action: keep
+
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          # The Phase 4/6 manifests all set app.kubernetes.io/name, so this
+          # turns into a usable "which service" label. Workloads that use a
+          # different label (ingress-nginx) simply end up with no value here.
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: app
+          # How the file target is found: /var/log/pods/<uid>/<container>/*.log
+          - action: replace
+            source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+            separator: /
+            target_label: __path__
+            replacement: /var/log/pods/*$1/*.log

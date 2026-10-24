@@ -20,7 +20,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 3 | Dockerfiles (multi-stage, non-root), docker-compose, GHCR push | done |
 | 4 | Kubernetes manifests on kind + CD and rollback | done |
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | done |
-| 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | pending |
+| 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | done |
 | 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | pending |
 | 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | pending |
 | 9 | Agent v2 (Prometheus/Loki/kubectl/Trivy tools, `/alert`, approval gate, audit log) | pending |
@@ -98,6 +98,8 @@ Full diagram and component notes: `docs/architecture.md` (Phase 1+).
 ```
 devsecops-agentic-platform/
 ├── .github/
+│   ├── scripts/
+│   │   └── check-monitoring.py      # Phase 6 - lints monitoring/*.yaml without a cluster
 │   ├── PULL_REQUEST_TEMPLATE.md
 │   └── workflows/            # ci.yml, cd.yml, security.yml (Phase 2+)
 ├── ansible/                  # Phase 5 - environment config + deployment
@@ -107,6 +109,7 @@ devsecops-agentic-platform/
 │   ├── playbooks/
 │   │   ├── roles/environment/       # renders ConfigMap + Secret from the inventory
 │   │   ├── roles/deploy/            # applies k8s/*.yaml, waits for the rollout
+│   │   ├── roles/monitoring/        # Phase 6 - applies monitoring/*.yaml
 │   │   ├── site.yml
 │   │   └── verify.yml               # end-to-end check through the Ingress
 │   ├── Dockerfile                   # Debian-based control node on the kind Docker network
@@ -126,12 +129,15 @@ devsecops-agentic-platform/
 │   └── 40-ingress.yaml
 ├── kind/
 │   └── kind-config.yaml      # cluster definition: port 80 -> host 8090
-├── monitoring/
-│   ├── alertmanager/
-│   ├── grafana/dashboards/
-│   ├── loki/
-│   ├── prometheus/rules/
-│   └── promtail/
+├── monitoring/               # Phase 6 - applied with "kubectl apply -R -f monitoring/"
+│   ├── alertmanager/         # configmap.yaml (route/receivers), deployment.yaml (+ Service)
+│   ├── grafana/              # datasources.yaml, dashboards.yaml (provider), deployment.yaml (uid 472)
+│   │   └── dashboards/platform-overview.yaml   # the dashboard JSON, as a ConfigMap
+│   ├── loki/                 # configmap.yaml (tsdb v13, 24h retention), deployment.yaml (+ Service)
+│   ├── prometheus/           # configmap.yaml (scrape config), deployment.yaml (+ Service)
+│   │   └── rules/platform-alerts.yaml          # the alert rules, as a ConfigMap
+│   ├── promtail/             # configmap.yaml (pipeline), daemonset.yaml, rbac.yaml
+│   └── ingress.yaml          # /prometheus, /grafana, /alertmanager through the same controller
 ├── services/
 │   ├── agent-service/        # DevOps Assistant Agent (Phase 8+)
 │   ├── order-service/        # calls user-service + product-service
@@ -579,7 +585,226 @@ Verified on this laptop (Terraform 1.16.6, ansible-core 2.18.19, `kubernetes.cor
 
 ---
 
-## CI pipeline (Phase 2, extended in Phases 3 and 5)
+## Monitoring and logging (Phase 6)
+
+Phase 5 made the platform **declared**. Phase 6 makes it **observable**: Prometheus scrapes the three services, Promtail ships their logs to Loki, Grafana puts both on one dashboard, and Alertmanager receives everything the rules fire. All of it runs in a namespace of its own so it can watch the services without competing with them.
+
+| Component | Version | Image | Role |
+|-----------|--------:|-------|------|
+| Prometheus | `v3.15.1` | `prom/prometheus:v3.15.1` | scrapes the services every 15s, evaluates the alert rules |
+| Alertmanager | `v0.34.1` | `prom/alertmanager:v0.34.1` | groups, deduplicates and routes what Prometheus fires |
+| Grafana | `13.2.4` | `grafana/grafana:13.2.4` | dashboards over both data sources |
+| Loki | `3.6.11` | `grafana/loki:3.6.11` | log storage — single binary, tsdb v13, filesystem, 24 h retention |
+| Promtail | `3.6.11` | `grafana/promtail:3.6.11` | DaemonSet that tails the node's pod logs and pushes them to Loki |
+
+Every image is pinned by tag and never `:latest` — [`check-monitoring.py`](.github/scripts/check-monitoring.py) fails CI if that stops being true.
+
+### Metrics path
+
+```
+user/product/order-service              Prometheus                        Alertmanager
+  /actuator/prometheus   <--scrape 15s---  |                                    ^
+  (Micrometer, Phase 1)                    |--- evaluate rules ---------->------|
+                                           |
+                                           |  /prometheus  (Ingress :8090 ---> host 8090)
+```
+
+Nothing had to be added to the services for this. `micrometer-registry-prometheus` has been on the classpath since Phase 1, and Phase 4's ConfigMap already exposed `health,info,metrics,prometheus` — Prometheus was the only missing half, so Phase 6 exposes existing state rather than changing the application.
+
+The scrape targets are **fully qualified** (`user-service.devsecops.svc.cluster.local:8081`) because these scrapes originate in the `monitoring` namespace, where a bare `user-service` does not resolve.
+
+### Log path
+
+```
+/var/log/pods/**  --hostPath-->  promtail (DaemonSet, one Pod per node)
+                                     |  CRI parse -> relabel -> namespace/app/pod/container/node
+                                     v
+                                  loki:3100  <-- Grafana Explore, and the dashboard's log panel
+```
+
+Promtail reads the log files off the **node**, not through the API server, so it only needs `get/list/watch pods` to discover labels ([`rbac.yaml`](monitoring/promtail/rbac.yaml)). Its `kubernetes_sd_config` selector is built from the node name, which Promtail 3.6 reads from the **`HOSTNAME`** environment variable — not `NODE_NAME` (see the pitfalls table).
+
+**Promtail is the one container in the whole platform that runs as root, deliberately.** The files under `/var/log/pods` are root-owned, and a non-root Promtail tails nothing (`Unable to find any logs to tail`, observed during this phase). Everything else runs as its image's own non-root uid — `65534` for Prometheus/Alertmanager, `472` for Grafana, `10001` for Loki — with `allowPrivilegeEscalation: false` and all capabilities dropped.
+
+### Ownership
+
+| Tool | Owns | Lives in |
+|------|------|----------|
+| Terraform | `Namespace/monitoring` — that object and nothing inside it | [`terraform/namespace.tf`](terraform/namespace.tf) |
+| Ansible | The **contents** of `monitoring/`, through the `monitoring` role | [`ansible/playbooks/roles/monitoring`](ansible/playbooks/roles/monitoring/tasks/main.yml) |
+| The manifests | Every object in the stack | [`monitoring/`](monitoring) |
+
+The same split as Phase 5: Terraform creates the namespace, Ansible deploys into it, and neither creates what the other owns. `check-monitoring.py` fails the build if a `Namespace` object ever appears under `monitoring/`, because that would put two tools in charge of one object.
+
+There is deliberately **no ResourceQuota on `monitoring`**, unlike `devsecops`: the stack is bounded by the requests and limits every container declares, and the Phase 5 quota stays a guardrail for the *services* rather than a budget the monitoring stack could spend and then be throttled by.
+
+### Deploying the stack
+
+```bash
+# Terraform first - it owns the namespace.
+cd terraform && terraform apply
+
+# Then the stack, either directly:
+kubectl apply -R -f monitoring/
+
+# ...or through Ansible, which is also what deploys the services:
+docker run --rm --network kind \
+  -v "C:/Users/<you>/devsecops-agentic-platform:/workspace" \
+  -v "C:/Users/<you>/AppData/Local/Temp/ds-iac/admin.conf:/root/.kube/config:ro" \
+  --workdir /workspace/ansible \
+  devsecops/ansible:latest -i inventory/hosts.ini playbooks/site.yml
+
+# The monitoring role on its own:
+docker run ... devsecops/ansible:latest -i inventory/hosts.ini playbooks/site.yml --tags monitoring
+```
+
+The role applies the ConfigMaps and RBAC *before* the workloads, waits for every Deployment to become available **and** for the Promtail DaemonSet to be ready on every node — so a green run means the pipeline works, not merely that the YAML was accepted. A re-run reports `changed=0`.
+
+### Access
+
+Everything goes through the ingress-nginx controller Phase 5 installed, on the same node port 80 → host 8090 the services already use. Each tool is served under its own path prefix, set with `--web.external-url` / `GF_SERVER_SERVE_FROM_SUB_PATH`, so the Ingress forwards the path **unchanged**:
+
+| UI | URL |
+|----|-----|
+| Prometheus | <http://localhost:8090/prometheus> |
+| Grafana | <http://localhost:8090/grafana> |
+| Alertmanager | <http://localhost:8090/alertmanager> |
+
+- **Grafana** — `admin` / `admin`. That is the image's documented default: the Deployment reads `GF_SECURITY_ADMIN_PASSWORD` from `Secret/grafana-admin` with `optional: true`, so the hook exists for a real deployment but no credential is committed. Create the Secret to override it:
+  ```bash
+  kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password='<password>'
+  ```
+- **Prometheus and Alertmanager need no login** — they are read-only here and reachable only from this laptop's port 8090.
+- **Loki is deliberately not exposed.** It has no UI of its own; query it in Grafana → Explore → **Loki**, or port-forward it for `curl`:
+  ```bash
+  kubectl -n monitoring port-forward svc/loki 3100:3100 &
+  curl -s 'http://localhost:3100/loki/api/v1/query_range' \
+    --data-urlencode 'query={namespace="devsecops", app="order-service"}' \
+    --data-urlencode "start=$(($(date +%s)-3600))000000000" \
+    --data-urlencode "end=$(date +%s)000000000"
+  ```
+
+No path rewriting is used at the Ingress, and that is deliberate: both Prometheus and Grafana build asset and API URLs from their own route prefix, so rewriting `/prometheus/...` to `/...` breaks their UIs.
+
+### Dashboards
+
+[`monitoring/grafana/dashboards/platform-overview.yaml`](monitoring/grafana/dashboards/platform-overview.yaml) provisions **Platform overview** (uid `platform-overview`) from a ConfigMap, in a folder called *Platform*, with its provider in [`dashboards.yaml`](monitoring/grafana/dashboards.yaml). A fresh Grafana Pod comes up with both data sources and the dashboard already loaded — no clicking, and no drift between git and the running Grafana.
+
+| Panel | Type | Source |
+|-------|------|--------|
+| Scrape targets up | stat | `up{job=~".+-service"}` |
+| Firing alerts | stat | `sum by (alertname) (ALERTS{alertstate="firing"})` |
+| Requests / sec | timeseries | `rate(http_server_requests_seconds_count[5m])` |
+| 5xx / sec | timeseries | the same, `status=~"5.."` |
+| p95 latency | timeseries | `histogram_quantile(0.95, ...)`, bucketed by service |
+| JVM heap used | timeseries | `jvm_memory_used_bytes{area="heap"}` |
+| Process CPU | timeseries | `process_cpu_usage{job=~".+-service"}` |
+| Service logs | logs | Loki `{namespace="devsecops"}` — the three services' stdout |
+
+The data sources are provisioned in [`datasources.yaml`](monitoring/grafana/datasources.yaml): **Prometheus** (uid `prometheus`, `http://prometheus:9090/prometheus`, default) and **Loki** (uid `loki`, `http://loki:3100`). Note the `/prometheus` in the Prometheus URL — the data source inherits the same route prefix the browser uses.
+
+### Alert rules
+
+[`monitoring/prometheus/rules/platform-alerts.yaml`](monitoring/prometheus/rules/platform-alerts.yaml). Every expression is built only on metrics the services already publish, which is why "CPU" is the JVM's own `process_cpu_usage` rather than a container counter — a real container-metrics rule would mean cAdvisor or kube-state-metrics, another pod or two on a laptop, and the spec asks for a trimmed stack.
+
+| Alert | Expression | For | Severity |
+|-------|-----------|----:|----------|
+| `ServiceDown` | `up{job=~".+-service"} == 0` | 1m | critical |
+| `HighErrorRate` | `sum by (service) (rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.05` | 2m | warning |
+| `HighProcessCpu` | `process_cpu_usage{job=~".+-service"} > 0.8` | 5m | warning |
+| `HighHeapUsage` | heap used / max > 0.9 | 5m | warning |
+| `Watchdog` | `vector(1)` | — | none |
+
+#### Testing the alert path safely
+
+`Watchdog` is the one alert you can exercise end to end **without breaking anything**: `vector(1)` is always 1, so it fires permanently by design, touches no service, and its severity (`none`) keeps it out of any real notification channel. Because it never resolves, it also proves the delivery path rather than a single alert: if it is missing from Alertmanager, routing is down.
+
+```bash
+# Prometheus evaluates it...
+curl -s localhost:8090/prometheus/api/v1/alerts      | grep Watchdog
+# ...and Alertmanager received it, under the default receiver.
+curl -s localhost:8090/alertmanager/api/v2/alerts    | grep Watchdog
+```
+
+For a *real* alert, `ServiceDown` is the safe live test — scale a service to zero and back, and give the rule its 1 minute:
+
+```bash
+kubectl -n devsecops scale deploy/product-service --replicas=0
+kubectl -n devsecops scale deploy/product-service --replicas=1   # restore
+```
+
+Alertmanager's `route` currently has one receiver (`default`) with **no integrations on purpose**: the webhook that consumes these alerts is the Phase 9 agent (`POST /alert`), and the commented `webhook_configs` block in [`alertmanager/configmap.yaml`](monitoring/alertmanager/configmap.yaml) is where it attaches. A receiver with no integrations is valid config — it accepts the notification and records it, which is what makes a firing alert visible in the Alertmanager UI.
+
+### Storage and retention
+
+Everything uses **emptyDir — no PersistentVolumes and no PVCs**, which is the Phase 6 decision for a laptop that had ~6 GB free. The trade is that history does not survive a Pod being recreated, which is why each component's retention is matched to that:
+
+| Component | Storage | Retention | Consequence |
+|-----------|---------|-----------|-------------|
+| Prometheus | `emptyDir` at `/prometheus` | `--storage.tsdb.retention.time=6h` | 6 h of metrics; gone if the Pod is recreated |
+| Loki | `emptyDir` at `/loki` | `retention_period: 24h`, compactor retention on | a day of logs, capped at `ingestion_rate_mb: 4` so a log loop cannot fill the disk |
+| Grafana | `emptyDir` at `/var/lib/grafana` | — | `grafana.db` (users, stars, ad-hoc edits) dies with the Pod; the dashboards themselves are ConfigMaps and come back |
+| Promtail | `hostPath` read-only + `/run/promtail/positions.yaml` | — | the read position is lost with the Pod, so a restart re-reads the tail of the logs |
+| Alertmanager | `emptyDir` at `/alertmanager` | `resolve_timeout: 5m` | the notification log (silences, dedup) dies with the Pod |
+
+Prometheus and Grafana use `Recreate` rather than `RollingUpdate` for the same reason: the new Pod gets an empty `emptyDir`, so a surge would only throw away the history the swap was meant to preserve.
+
+### Resource requirements
+
+Every container declares requests and limits, and the whole stack is small enough to sit on a laptop beside the services:
+
+| Component | CPU request | Memory request | CPU limit | Memory limit | Measured |
+|-----------|------------:|---------------:|----------:|-------------:|---------:|
+| Prometheus | 100m | 256Mi | 500m | 512Mi | ~4m / 57Mi |
+| Grafana | 100m | 256Mi | 500m | 512Mi | ~16m / 245Mi |
+| Loki | 100m | 256Mi | 500m | 512Mi | ~9m / 76Mi |
+| Alertmanager | 20m | 64Mi | 100m | 128Mi | ~1m / 18Mi |
+| Promtail (per node) | 50m | 128Mi | 200m | 256Mi | ~10m / 36Mi |
+| **Total** | **370m** | **960Mi** | **1.8** | **1.9Gi** | **~40m / 432Mi** |
+
+The image layers are the real cost, not the runtime: Prometheus 266 MB, Grafana 1.42 GB, Promtail 245 MB, Loki 137 MB, Alertmanager 82 MB — about 2.1 GB of images to pull once. `kind` reuses its node image, so no cluster is rebuilt for this.
+
+### What has actually been tested
+
+Verified on this laptop (Docker Engine 28.0.4, single-node kind cluster `devsecops`, Terraform 1.16.6, ansible-core 2.18.19, `kubernetes.core` 6.6.0, ansible-lint 26.10.1):
+
+| Check | Result |
+|-------|--------|
+| The five Pods | `alertmanager`, `grafana`, `loki`, `prometheus` and `promtail` all `1/1 Running` |
+| Prometheus targets | **4/4 `up`** — `prometheus`, `user-service`, `product-service`, `order-service` |
+| Prometheus rules loaded | groups `platform` (`ServiceDown`, `HighErrorRate`, `HighProcessCpu`, `HighHeapUsage`) and `pipeline` (`Watchdog`) |
+| Prometheus fires | `/api/v1/alerts` → `Watchdog firing severity=none` |
+| Prometheus → Alertmanager delivery | `/api/v2/alerts` → `Watchdog active receiver=default` |
+| Grafana | `/grafana/api/health` → `{"database":"ok","version":"13.2.4"}` |
+| Grafana data sources | `Prometheus` (default, `http://prometheus:9090/prometheus`) and `Loki` (`http://loki:3100`) |
+| Grafana dashboard | `Platform overview` (uid `platform-overview`) present in folder *Platform* |
+| Loki receives logs | `/loki/api/v1/labels` → `app, container, filename, namespace, node, pod, service_name, stream` |
+| Loki returns logs | `query_range` on `{namespace="devsecops", app="order-service"}` returns real log lines |
+| Promtail | DaemonSet `1/1` ready; service discovery `10/10` ready |
+| Application still healthy | 3/3 pods `Running`; `GET /api/products` through the Ingress → **200** |
+| HPA still real | `cpu: 3%/70%` (order), `2%/70%` (product, user) |
+| Terraform | `fmt -check -recursive` exit 0; `validate` → `Success!`; `plan` → `No changes` (the `monitoring` namespace is already in state, imported by Terraform) |
+| Ansible | `--syntax-check` exit 0; `ansible-lint` → `0 failure(s), 0 warning(s) … 'production' profile passed`; `site.yml --tags monitoring` → `ok=9 changed=0 failed=0` |
+| `check-monitoring.py` | passes on the repository (`15 file(s), 21 document(s), 5 workload(s), 5 alert rule(s)`) and was verified to **fail** on an injected `:latest` image, missing requests/limits, missing readiness probe, literal `DB_PASSWORD`, and a rule with no `expr` and an unroutable severity |
+
+Two real defects were found and fixed by this verification rather than by reading the YAML, both listed in the pitfalls table: Prometheus could not scrape **itself** (wrong metrics path under the route prefix), and Prometheus could not **deliver** a single alert (Alertmanager's API is also behind its route prefix).
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| A target in Prometheus is `down` with `404` — e.g. `prometheus` on `http://localhost:9090/metrics` | Prometheus serves *everything* under its `--web.external-url` prefix, so its own metrics are at `/prometheus/metrics`. Set `metrics_path: /prometheus/metrics` on the `prometheus` job. |
+| Prometheus log: `Error sending alerts … err="bad response status 404 Not Found"`, Alertmanager UI always empty | Alertmanager also serves everything under its `--web.external-url` prefix, so its API is `/alertmanager/api/v2/alerts`. Set `path_prefix: /alertmanager` on the Alertmanager target — Prometheus otherwise POSTs to `/api/v2/alerts`. |
+| Promtail logs `Unable to find any logs to tail`, `/ready` returns 500, service discovery finds 0 targets | Promtail 3.6 fills its `kubernetes_sd` field selector from the **`HOSTNAME`** environment variable, not `NODE_NAME`. Setting only `NODE_NAME` makes the selector `spec.nodeName=<pod name>`, which matches nothing. Provide `HOSTNAME` from `fieldRef: spec.nodeName`. |
+| Promtail's DaemonSet update never rolls | The old Pod is not Ready, so the DaemonSet cannot take it out of service. Delete it: `kubectl -n monitoring delete pod -l app.kubernetes.io/name=promtail`. |
+| Grafana loads but its panels error, or the UI has no CSS behind the Ingress | The route prefix is missing. `GF_SERVER_SERVE_FROM_SUB_PATH=true` must be paired with `GF_SERVER_ROOT_URL=http://localhost:8090/grafana/`, and the Ingress must **not** rewrite the path. |
+| Prometheus reports `Kubernetes cluster unreachable` / `connection refused` in a plan | Same Phase 5 gotcha — the provider needs `KUBE_CONFIG_PATH`, not `KUBECONFIG`. |
+| A container in the stack is evicted or the node runs out of disk | Check `kubectl top pods -n monitoring` and `docker system df`. Every container's limits are in the table above; lower Prometheus' `--storage.tsdb.retention.time` or Loki's `retention_period` rather than removing the stack. |
+| Grafana asks for a login and `admin`/`admin` is refused | A `Secret/grafana-admin` exists with a different password. Read it with `kubectl -n monitoring get secret grafana-admin -o jsonpath="{.data.admin-password}"` and base64-decode, or delete the Secret to fall back to the default. |
+
+---
+
+## CI pipeline (Phase 2, extended in Phases 3, 5 and 6)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
@@ -588,7 +813,8 @@ Verified on this laptop (Terraform 1.16.6, ansible-core 2.18.19, `kubernetes.cor
 | `build` (matrix: 3 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
 | `docker` (matrix: 3 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
 | `iac` | Phase 5 — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, then `ansible-playbook --syntax-check` and `ansible-lint` on both playbooks. Runs against no cluster |
-| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker` or `iac` failed |
+| `monitoring` | Phase 6 — installs PyYAML and runs `.github/scripts/check-monitoring.py`, a cluster-free linter over `monitoring/*.yaml`: valid YAML, no `Namespace` object where Terraform owns one, every workload pinned to `monitoring` with tagged images, resource requests/limits, readiness probes and no literal secret values, and every alert rule carrying `expr`/`severity`/`annotations.summary` |
+| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker`, `iac` or `monitoring` failed |
 
 Design notes:
 
@@ -600,6 +826,7 @@ Design notes:
 - **No third-party actions** beyond `actions/checkout`, `actions/setup-java`, `actions/upload-artifact`, and — for the `iac` job — `hashicorp/setup-terraform` and `actions/setup-python`, which keeps the supply-chain surface small before Phase 7 starts scanning it. The image build uses plain `docker build`/`docker push` rather than an extra action.
 - **`docker` is skipped on pull requests** and only pushes from `main`/`v*` tags, so feature branches still prove the Dockerfile builds without publishing a moving `latest` tag.
 - **`iac` needs no cluster.** `terraform init -backend=false` plus `validate` only needs the providers, and `--syntax-check`/`ansible-lint` only read the playbooks, so the job is fast and deterministic and never depends on a live API server. The `ansible` toolchain is pinned by [`ansible/requirements.txt`](ansible/requirements.txt) and [`ansible/requirements.yml`](ansible/requirements.yml), the same files the local container image installs from — so CI lints with the same versions as the laptop.
+- **`monitoring` needs no cluster either.** The manifests are linted statically by [`check-monitoring.py`](.github/scripts/check-monitoring.py) (its only dependency, `PyYAML`, is pinned in [`.github/scripts/requirements.txt`](.github/scripts/requirements.txt)), so the job catches the mistakes that are cheap to make in YAML — an untagged image, a missing probe, a rule with no `expr` — without standing up a kind cluster on a GitHub runner. That the stack actually comes up and the pipeline flows end to end was verified on the local cluster; see the "What has actually been tested" table above.
 
 The badge at the top of this README reflects the `main` branch run.
 

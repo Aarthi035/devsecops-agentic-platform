@@ -16,6 +16,12 @@
 # Both roles are idempotent: a second run reports no changes unless something
 # really drifted. Run playbooks/verify.yml afterwards to check the result end
 # to end through the Ingress.
+#
+# The monitoring role is Phase 6. It applies the observability manifests in
+# ../../monitoring, whose namespace terraform/ owns - the same split as the
+# platform itself. Skip it on a machine that has no room for the stack:
+#
+#   ansible-playbook -i inventory/hosts.ini playbooks/site.yml --skip-tags monitoring
 
 - name: Configure the platform environment and deploy the services
   hosts: cluster
@@ -26,3 +32,5 @@
       tags: [environment]
     - role: deploy
       tags: [deploy]
+    - role: monitoring
+      tags: [monitoring]

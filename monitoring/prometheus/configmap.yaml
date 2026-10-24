@@ -1,0 +1,86 @@
+# Prometheus scrape configuration.
+#
+# Kept in a ConfigMap rather than baked into the image so that adding a target
+# is a manifest change, and so the config is reviewable in the repository.
+#
+# The three platform services already expose /actuator/prometheus - Micrometer
+# has been on the classpath since Phase 1 and the Phase 4 manifests never had
+# to touch it. Prometheus only has to be told where to look.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  prometheus.yml: |
+    global:
+      # 15s matches the services' own metrics step, so a scrape never
+      # straddles two samples.
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: devsecops
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    # Where firing alerts go. "alertmanager" is the Service in this namespace;
+    # in-cluster DNS names are how the stack talks to itself.
+    #
+    # path_prefix matters: Alertmanager runs with
+    # --web.external-url=http://localhost:8090/alertmanager/, so it serves
+    # *everything* under /alertmanager - including the API. Prometheus otherwise
+    # POSTs to /api/v2/alerts and gets "404 Not Found" (visible in the
+    # Prometheus log as "Error sending alerts ... count=1"). Its service target
+    # port is still 9093; the prefix is a path, not a port.
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager:9093"]
+          path_prefix: /alertmanager
+
+    scrape_configs:
+      # Prometheus scraping itself, which is what makes the "is the monitoring
+      # stack healthy" panels in Grafana possible.
+      #
+      # The metrics path carries the route prefix too: --web.external-url ends
+      # in /prometheus/, so every endpoint - including /metrics - is served
+      # below it. The default /metrics returns 404 here, which showed up as
+      # "prometheus down http://localhost:9090/metrics" in the targets page.
+      - job_name: prometheus
+        metrics_path: /prometheus/metrics
+        static_configs:
+          - targets: ["localhost:9090"]
+            labels:
+              service: prometheus
+
+      # The platform services. These are fully qualified DNS names rather than
+      # bare "user-service", because the bare name only resolves *within* the
+      # devsecops namespace and these scrapes originate in "monitoring".
+      #
+      # The name is user-service.devsecops.svc.cluster.local - namespace first,
+      # then svc, then the cluster domain. "localhost" would resolve to the
+      # Prometheus pod itself.
+      - job_name: user-service
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ["user-service.devsecops.svc.cluster.local:8081"]
+            labels:
+              service: user-service
+
+      - job_name: product-service
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ["product-service.devsecops.svc.cluster.local:8082"]
+            labels:
+              service: product-service
+
+      - job_name: order-service
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ["order-service.devsecops.svc.cluster.local:8083"]
+            labels:
+              service: order-service

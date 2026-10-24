@@ -16,6 +16,27 @@ resource "kubernetes_namespace_v1" "platform" {
   }
 }
 
+# The Phase 6 observability stack lives in its own namespace.
+#
+# Two reasons, both about blast radius: the platform's ResourceQuota below
+# bounds the *services*, and a monitoring stack that shared the namespace would
+# spend that budget (and, on a laptop, would be the first thing to hit the pod
+# ceiling); and a single Prometheus/Loki pod ballooning would then be able to
+# evict the services it is supposed to be watching.
+#
+# No quota here on purpose. The stack is trimmed by hand-written manifests in
+# ../monitoring (see the Phase 6 README section) rather than policed by a
+# quota, and every container in it declares its own requests and limits.
+resource "kubernetes_namespace_v1" "monitoring" {
+  metadata {
+    name = var.monitoring_namespace
+    labels = {
+      "app.kubernetes.io/part-of"    = "devsecops-platform"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
+}
+
 # A ceiling for the whole namespace. The three services peaking at
 # HPA maxReplicas (3 pods x 100m/320Mi requests, 500m/640Mi limits) need about
 # 900m CPU and 3Gi of requests, so the defaults leave plenty of room and still

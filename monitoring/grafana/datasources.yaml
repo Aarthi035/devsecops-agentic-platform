@@ -1,0 +1,35 @@
+# Grafana datasources, provisioned from a file on startup.
+#
+# The uid is set explicitly ("prometheus", "loki") so the dashboard JSON in
+# ./dashboards/ can reference the datasource by uid and keep working no matter
+# what Grafana auto-generates.
+#
+# The Prometheus URL carries the /prometheus suffix because Prometheus serves
+# everything under its own route prefix (see ../prometheus/deployment.yaml).
+# Grafana is talking to Prometheus directly inside the cluster, so the
+# sub-path is part of the API address, not an Ingress concern.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090/prometheus
+        isDefault: true
+        jsonData:
+          timeInterval: 15s
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: http://loki:3100

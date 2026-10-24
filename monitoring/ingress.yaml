@@ -1,0 +1,45 @@
+# One Ingress for the whole observability stack, served by the same nginx
+# controller that fronts the services (k8s/40-ingress.yaml).
+#
+# Each backend is given its own URL prefix and is configured to serve from that
+# prefix (Prometheus and Alertmanager via --web.external-url, Grafana via
+# GF_SERVER_SERVE_FROM_SUB_PATH). The Ingress therefore does NOT rewrite the
+# path: /prometheus/... is forwarded unchanged. Rewriting breaks all three UIs,
+# because each app builds its asset and API links from the prefix it was told
+# to serve under.
+#
+# Like the service Ingress there is no "host", so any Host header matches and
+# http://localhost:8090/prometheus/ works without editing the hosts file.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitoring
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /prometheus
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  number: 9090
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+          - path: /alertmanager
+            pathType: Prefix
+            backend:
+              service:
+                name: alertmanager
+                port:
+                  number: 9093

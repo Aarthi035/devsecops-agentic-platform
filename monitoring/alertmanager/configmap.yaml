@@ -1,0 +1,41 @@
+# Alertmanager routing.
+#
+# Phase 6 wires Prometheus -> Alertmanager and leaves delivery alone: the agent
+# webhook that actually consumes these alerts is Phase 9 (POST /alert on
+# agent-service). A receiver with no integrations is valid Alertmanager config
+# - it accepts the notification and records it, which is what makes the firing
+# alert visible in the Alertmanager UI. That visibility is what this phase
+# verifies.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+
+    route:
+      receiver: default
+      # One notification per (alert, service) instead of one per alert across
+      # every service.
+      group_by: ["alertname", "service"]
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+
+    receivers:
+      - name: default
+        # Phase 9 adds the agent here, and routes to it, without touching
+        # anything else in this file:
+        #
+        #   webhook_configs:
+        #     - url: http://agent-service.<namespace>.svc.cluster.local:<port>/alert
+        #       send_resolved: true
+        #
+        # The host, port and path are whatever Phase 9 gives agent-service - the
+        # point is that delivery is the only thing this phase leaves out.

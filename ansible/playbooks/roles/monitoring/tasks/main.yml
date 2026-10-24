@@ -1,0 +1,110 @@
+---
+# The Phase 6 observability stack.
+#
+# Same division of labour as the deploy role: the manifests in ../../monitoring
+# are the single source of truth and Ansible applies the files rather than
+# restating them, so what Ansible deploys cannot drift from what
+# "kubectl apply -R -f monitoring/" and the README describe.
+#
+# The namespace is NOT one of these files - terraform/namespace.tf owns it, the
+# same way it owns the platform namespace. Nothing in this role creates it, so
+# Terraform and Ansible never own the same object.
+
+- name: Look up the namespace Terraform created
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ monitoring_namespace }}"
+  register: monitoring_namespace_info
+
+- name: Require the namespace to exist before deploying into it
+  ansible.builtin.assert:
+    that:
+      - monitoring_namespace_info.resources | length == 1
+    fail_msg: >-
+      Namespace '{{ monitoring_namespace }}' does not exist. Terraform owns it -
+      run "terraform apply" in ../terraform.
+    success_msg: "Namespace '{{ monitoring_namespace }}' is present."
+
+# find(..., recurse=true) rather than fileglob: the monitoring tree is nested
+# (prometheus/rules/, grafana/dashboards/), and find walks it. fileglob only
+# expands the last path segment of its pattern.
+- name: Find every monitoring manifest
+  ansible.builtin.find:
+    paths: "{{ monitoring_dir }}"
+    patterns: "*.yaml"
+    recurse: true
+  register: monitoring_manifest_files
+  changed_when: false
+
+- name: Collect the manifest paths
+  ansible.builtin.set_fact:
+    monitoring_manifests: "{{ monitoring_manifest_files.files | map(attribute='path') | sort }}"
+
+# Two passes, because the resources genuinely have an order.
+#
+# A Deployment created before its ConfigMap is not a failure - the kubelet
+# retries the container once the ConfigMap appears - but it does produce a
+# CreateContainerConfigError event and a Pod that is briefly wrong, and in the
+# prometheus case the missing object is prometheus-rules, which sorts *after*
+# deployment.yaml. Applying the configuration first removes the race instead of
+# relying on the retry loop to paper over it. The split is on file name
+# ("deployment.yaml", "daemonset.yaml", "ingress.yaml" hold the workloads and
+# the Service that goes with them), not on a hand-maintained list.
+- name: Apply the ConfigMaps and RBAC first
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: "{{ monitoring_manifests | reject('search', '(deployment|daemonset|ingress)\\.yaml$') | list }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Apply the monitoring workloads
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: "{{ monitoring_manifests | select('search', '(deployment|daemonset|ingress)\\.yaml$') | list }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+# The same "wait for available" the deploy role does for the platform, so a run
+# that says it succeeded has actually converged rather than merely applied.
+- name: Wait for every monitoring Deployment to become available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ monitoring_namespace }}"
+  register: monitoring_deployments
+  changed_when: false
+  until: >-
+    (monitoring_deployments.resources | length) > 0 and
+    (monitoring_deployments.resources | map(attribute='spec.replicas', default=1) | list)
+    == (monitoring_deployments.resources | map(attribute='status.availableReplicas', default=0) | list)
+  retries: "{{ rollout_retries }}"
+  delay: "{{ rollout_delay }}"
+
+# Promtail is a DaemonSet, so it needs its own check: one Pod per node, all
+# Ready. Without this the role would report success while log collection was
+# silently broken - which is exactly the failure this phase had to fix.
+- name: Wait for the log collector to be ready on every node
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: DaemonSet
+    namespace: "{{ monitoring_namespace }}"
+  register: monitoring_daemonsets
+  changed_when: false
+  until: >-
+    (monitoring_daemonsets.resources | length) > 0 and
+    (monitoring_daemonsets.resources | map(attribute='status.numberReady', default=0) | list)
+    == (monitoring_daemonsets.resources | map(attribute='status.desiredNumberScheduled', default=0) | list)
+  retries: "{{ rollout_retries }}"
+  delay: "{{ rollout_delay }}"
+
+- name: Report what is running
+  ansible.builtin.debug:
+    msg: >-
+      {{ monitoring_deployments.resources | length }} Deployment(s) available and
+      {{ monitoring_daemonsets.resources | length }} DaemonSet(s) ready in
+      '{{ monitoring_namespace }}':
+      {{ monitoring_deployments.resources | map(attribute='metadata.name') | list | join(', ') }}.
+      Reach the UIs through the Ingress at {{ monitoring_base_url }}.

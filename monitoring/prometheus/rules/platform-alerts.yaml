@@ -1,0 +1,109 @@
+# Alert rules for the platform services.
+#
+# Every expression is built only on metrics the services already publish
+# through Micrometer (/actuator/prometheus) - no cAdvisor, no kube-state-metrics,
+# because those would mean another pod or two on a laptop. That is why "CPU" is
+# read as the JVM's own process_cpu_usage rather than a container CPU counter,
+# and why there is no "pod restarted" rule.
+#
+# The "service" label comes from the static scrape config in ../configmap.yaml,
+# so every series here can be grouped and alerted on per service.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  platform-alerts.yml: |
+    groups:
+      - name: platform
+        rules:
+          # Prometheus could not scrape the service at all: the pod is down,
+          # the port is wrong, or the app is not answering. This is the alert
+          # that maps to demo scenario 3 ("crash a pod").
+          - alert: ServiceDown
+            expr: up{job=~".+-service"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "{{ $labels.service }} is not scrapeable"
+              description: >-
+                Prometheus has failed to scrape {{ $labels.service }} for a
+                minute. Check the pod: kubectl get pods -n devsecops.
+
+          # Server errors reaching the client. Rate is per second over five
+          # minutes, so a single 500 does not page anyone.
+          - alert: HighErrorRate
+            expr: >-
+              sum by (service) (rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.05
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} is returning 5xx"
+              description: >-
+                {{ $labels.service }} has been serving more than 0.05 server
+                errors per second for two minutes.
+
+          # The JVM process is saturating what it is allowed to use. The HPA
+          # reacts to this too (70% target), so the two together show the
+          # scaling story.
+          - alert: HighProcessCpu
+            expr: process_cpu_usage{job=~".+-service"} > 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} CPU is above 80%"
+              description: >-
+                process_cpu_usage for {{ $labels.service }} has been above 0.8
+                for five minutes.
+
+          # Heap pressure. A division by a negative "max" (the JVM reports -1
+          # when no max is set) yields a negative ratio and simply never fires,
+          # so no extra guard is needed.
+          - alert: HighHeapUsage
+            expr: >-
+              sum by (service) (jvm_memory_used_bytes{area="heap"})
+                / sum by (service) (jvm_memory_max_bytes{area="heap"}) > 0.9
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} heap is above 90%"
+              description: >-
+                {{ $labels.service }} is using more than 90% of its heap. The
+                Phase 4 limit is 640Mi per pod.
+
+      # The safe end-to-end test of the alerting path.
+      #
+      # "vector(1)" is always 1, so this alert is always firing by design. It
+      # touches no service, so it can be used to prove Prometheus evaluates
+      # rules, sends the alert and Alertmanager accepts it, without breaking
+      # anything or waiting for a real incident. It is the same idea as the
+      # standard Prometheus "Watchdog" alert: the real signal is its *absence*,
+      # and because it never resolves, the repeat_interval in Alertmanager
+      # keeps a heartbeat flowing.
+      #
+      # Verify with:
+      #   curl -s localhost:8090/prometheus/api/v1/alerts  | findstr Watchdog
+      #   curl -s localhost:8090/alertmanager/api/v2/alerts | findstr Watchdog
+      - name: pipeline
+        rules:
+          - alert: Watchdog
+            expr: vector(1)
+            labels:
+              # Deliberately not critical or warning: it must never look like a
+              # real incident in a dashboard or a notification channel.
+              severity: none
+            annotations:
+              summary: "The alerting pipeline is delivering alerts"
+              description: >-
+                Always firing. Seeing it in Alertmanager means Prometheus rule
+                evaluation, the alerting config and Alertmanager routing all
+                work. The ServiceDown, HighErrorRate, HighProcessCpu and
+                HighHeapUsage rules above are the ones that mean something.

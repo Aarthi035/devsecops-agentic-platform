@@ -1,0 +1,115 @@
+# Promtail DaemonSet.
+#
+# THREE THINGS THAT ARE EASY TO GET WRONG HERE
+#
+# 0. The HOSTNAME env var. Promtail injects a "spec.nodeName=<node>" field
+#    selector into the kubernetes_sd_config so a DaemonSet only tails its own
+#    node's logs - and it reads that node name from the HOSTNAME environment
+#    variable, which Kubernetes sets to the *pod name*. The selector then reads
+#    "spec.nodeName=promtail-abc12" and matches nothing: the DaemonSet runs,
+#    logs no error, and reports 0/0 targets with /ready stuck on 500.
+#
+#    This was verified against promtail 3.6.11 rather than assumed. Setting
+#    NODE_NAME does nothing (that is the variable the Loki docs mention for
+#    Prometheus' own SD, not promtail's); overriding HOSTNAME from the downward
+#    API is what the running container's /config actually reflects:
+#
+#      $ kubectl -n monitoring exec ds/promtail -- env | grep NODE_NAME
+#      NODE_NAME=devsecops-control-plane
+#      $ curl localhost:9080/config | grep -A1 'role: pod'
+#      field: spec.nodeName=devsecops-control-plane
+#
+#    Note that the container's *kernel* hostname is still the pod name; only
+#    the environment variable is overridden, which is what promtail reads.
+#
+# 1. The toleration. The kind cluster is a single node that is also the control
+#    plane (kind/kind-config.yaml), and kubeadm taints that node with
+#    node-role.kubernetes.io/control-plane:NoSchedule. A DaemonSet without the
+#    matching toleration schedules *zero* pods and no logs ever arrive - with no
+#    error anywhere except the DaemonSet's DESIRED/CURRENT columns.
+#
+# 2. The security context. This is the one workload in the project that
+#    deliberately does not run as non-root: it reads the node's log files, which
+#    are owned by root. It stays read-only everywhere else (readOnlyRootFilesystem,
+#    no privilege escalation) and mounts the log directory read-only.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: promtail
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: promtail
+        app.kubernetes.io/part-of: devsecops-platform
+      annotations:
+        checksum/config: "promtail-config-v1"
+    spec:
+      serviceAccountName: promtail
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: promtail
+          image: grafana/promtail:3.6.11
+          args:
+            - -config.file=/etc/promtail/promtail.yaml
+          env:
+            # See note 0 above. The value must be the node name, and the
+            # variable name must be HOSTNAME.
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: http
+              containerPort: 9080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/promtail
+            - name: positions
+              mountPath: /run/promtail
+            # The node's log directory. readOnly, so a compromised promtail
+            # cannot rewrite the logs it is shipping.
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: promtail-config
+        - name: positions
+          emptyDir: {}
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: Directory

@@ -229,11 +229,44 @@ jobs:
         working-directory: ansible
         run: ansible-lint
 
+  # Phase 6: the monitoring stack is configuration, and configuration is the
+  # part of it CI can check without a cluster. Nothing here starts a kind
+  # cluster or pulls a monitoring image - that stays cd.yml's job on a machine
+  # that has one.
+  #
+  # .github/scripts/check-monitoring.py parses every manifest under
+  # monitoring/ and asserts the invariants the phase depends on, so a manifest
+  # that would only fail at apply time fails the build instead: an unpinned
+  # image, a container with no requests or limits, a literal password in an env
+  # var, a Namespace Terraform already owns, an alert rule with no expression
+  # or with a severity nothing routes on. Run it locally with:
+  #
+  #   python3 .github/scripts/check-monitoring.py
+  monitoring:
+    name: Monitoring config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --disable-pip-version-check -r .github/scripts/requirements.txt
+
+      - name: Validate the monitoring manifests
+        run: python3 .github/scripts/check-monitoring.py
+
   # Single check to require in branch protection: it fails if any matrix leg failed.
   ci-status:
     name: CI status
     if: always()
-    needs: [build, docker, iac]
+    needs: [build, docker, iac, monitoring]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed
@@ -241,6 +274,7 @@ jobs:
           echo "build matrix result: ${{ needs.build.result }}"
           echo "docker matrix result: ${{ needs.docker.result }}"
           echo "iac result: ${{ needs.iac.result }}"
+          echo "monitoring result: ${{ needs.monitoring.result }}"
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::One or more service builds did not succeed."
             exit 1
@@ -252,5 +286,9 @@ jobs:
           fi
           if [ "${{ needs.iac.result }}" != "success" ]; then
             echo "::error::The Terraform or Ansible checks did not succeed."
+            exit 1
+          fi
+          if [ "${{ needs.monitoring.result }}" != "success" ]; then
+            echo "::error::The monitoring configuration checks did not succeed."
             exit 1
           fi

@@ -19,6 +19,12 @@ variable "namespace" {
   default     = "devsecops"
 }
 
+variable "monitoring_namespace" {
+  description = "Namespace that holds the Phase 6 observability stack (Prometheus, Grafana, Loki, Promtail, Alertmanager)."
+  type        = string
+  default     = "monitoring"
+}
+
 variable "ingress_nginx_version" {
   description = <<-EOT
     ingress-nginx Helm chart version. Keep this in step with

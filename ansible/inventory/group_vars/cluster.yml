@@ -53,3 +53,17 @@ rollout_delay: 5
 # http://localhost:8090 from the Windows host, because kind maps node port 80
 # to host port 8090 (kind/kind-config.yaml).
 ingress_base_url: "http://devsecops-control-plane"
+
+# Phase 6. Also owned by Terraform (terraform/namespace.tf, the
+# kubernetes_namespace_v1.monitoring resource) and only deployed into here.
+monitoring_namespace: monitoring
+
+# The Phase 6 manifests, addressed the same way k8s_dir is, so a run does not
+# depend on the current working directory.
+monitoring_dir: "{{ playbook_dir | dirname | dirname }}/monitoring"
+
+# Where the monitoring UIs answer from the control node - the same Ingress and
+# the same node port as the platform, one path prefix per tool. Prometheus,
+# Grafana and Alertmanager are the only three exposed; Loki is queried through
+# Grafana or with kubectl port-forward.
+monitoring_base_url: "{{ ingress_base_url }}/prometheus"
