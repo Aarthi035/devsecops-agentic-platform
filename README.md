@@ -789,6 +789,11 @@ Verified on this laptop (Docker Engine 28.0.4, single-node kind cluster `devseco
 
 Two real defects were found and fixed by this verification rather than by reading the YAML, both listed in the pitfalls table: Prometheus could not scrape **itself** (wrong metrics path under the route prefix), and Prometheus could not **deliver** a single alert (Alertmanager's API is also behind its route prefix).
 
+Verified on GitHub Actions: run [40067470712](https://github.com/Aarthi035/devsecops-agentic-platform/actions/runs/40067470712)
+for commit `f27383a` — every job green, including the new **Monitoring config** job, which installed `PyYAML 6.0.3` and ran
+`check-monitoring.py` to completion (`OK: 15 file(s), 21 document(s), 5 workload(s), 5 alert rule(s)`), alongside the three
+service builds, the three image builds, the IaC lint and the combined `CI status` gate.
+
 ### Troubleshooting
 
 | Symptom | Cause and fix |
