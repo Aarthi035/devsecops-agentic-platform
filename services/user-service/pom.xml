@@ -24,6 +24,16 @@
              11.0.24, and the "Image" job in .github/workflows/security.yml
              fails on the HIGH Tomcat CVEs that 11.0.25 fixes. -->
         <tomcat.version>11.0.26</tomcat.version>
+        <!-- Same reason as Tomcat, one line up: 4.1.1 manages Jackson 3.1.5,
+             and the "Image" job reports five HIGH CVEs against it. 3.2.2, the
+             newest jackson-bom there is, clears all five - and does not run
+             here: its databind asks for
+             com.fasterxml.jackson.annotation.JsonApplyView, the annotations
+             version Boot 4.1.1 manages does not have it, and the first
+             serialized response dies with NoClassDefFoundError. 3.1.6 is the
+             newest release that does run, and it fixes CVE-2026-68497.
+             .trivyignore.yaml records the four that are left, and why. -->
+        <jackson-bom.version>3.1.6</jackson-bom.version>
         <!-- Phase 7. The NVD API is rate-limited without a key, so the
              "Dependencies" job in .github/workflows/security.yml passes this
              in with -Dnvd.api.key=${{ secrets.NVD_API_KEY }} when the secret
@@ -125,6 +135,14 @@
                          once per service. -->
                     <dataDirectory>${user.home}/.dependency-check-data</dataDirectory>
                     <nvdApiKey>${nvd.api.key}</nvdApiKey>
+                    <!-- The Sonatype OSS Index analyzer is on by default, and
+                         the API it calls now answers 401: the free
+                         component-report endpoint it depends on has been
+                         retired. Every dependency therefore raised an
+                         AnalysisException, and the job failed on ~40 of them
+                         before it had looked at a single finding. The NVD feed
+                         is the analyzer this scan is for. -->
+                    <ossindexAnalyzerEnabled>false</ossindexAnalyzerEnabled>
                 </configuration>
             </plugin>
         </plugins>
