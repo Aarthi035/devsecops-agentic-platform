@@ -11,6 +11,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 <!-- Badges are added in Phase 2 (CI), Phase 7 (security), later phases as they land. -->
 [![CI](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/ci.yml)
 [![CD](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/cd.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/cd.yml)
+[![Security](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml/badge.svg)](https://github.com/Aarthi035/devsecops-agentic-platform/actions/workflows/security.yml)
 
 | Phase | Scope | Status |
 |------:|-------|--------|
@@ -21,7 +22,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 4 | Kubernetes manifests on kind + CD and rollback | done |
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | done |
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | done |
-| 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | pending |
+| 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | done |
 | 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | pending |
 | 9 | Agent v2 (Prometheus/Loki/kubectl/Trivy tools, `/alert`, approval gate, audit log) | pending |
 | 10 | Evals, Langfuse tracing, Grafana agent panel, demo scripts, report | pending |
@@ -99,16 +100,17 @@ Full diagram and component notes: `docs/architecture.md` (Phase 1+).
 devsecops-agentic-platform/
 ├── .github/
 │   ├── scripts/
-│   │   └── check-monitoring.py      # Phase 6 - lints monitoring/*.yaml without a cluster
+│   │   ├── check-monitoring.py      # Phase 6 - lints monitoring/*.yaml without a cluster
+│   │   └── check-security.py        # Phase 7 - asserts RBAC/NetworkPolicy/Pod hardening
 │   ├── PULL_REQUEST_TEMPLATE.md
-│   └── workflows/            # ci.yml, cd.yml, security.yml (Phase 2+)
+│   └── workflows/            # ci.yml, cd.yml, security.yml
 ├── ansible/                  # Phase 5 - environment config + deployment
 │   ├── inventory/
 │   │   ├── group_vars/cluster.yml   # namespace, app_config, Secret values, rollout budget
 │   │   └── hosts.ini                # one implicit localhost on the kind network
 │   ├── playbooks/
 │   │   ├── roles/environment/       # renders ConfigMap + Secret from the inventory
-│   │   ├── roles/deploy/            # applies k8s/*.yaml, waits for the rollout
+│   │   ├── roles/deploy/            # applies k8s/**/*.yaml recursively, waits for the rollout
 │   │   ├── roles/monitoring/        # Phase 6 - applies monitoring/*.yaml
 │   │   ├── site.yml
 │   │   └── verify.yml               # end-to-end check through the Ingress
@@ -118,7 +120,7 @@ devsecops-agentic-platform/
 │   └── requirements.yml             # kubernetes.core collection
 ├── docs/                     # prerequisites, architecture, report outline, demo scripts
 ├── evals/                    # failure scenarios, expected root causes, runner script (Phase 10)
-├── k8s/                      # Phase 4 - applied in filename order
+├── k8s/                      # Phase 4 (+ Phase 7) - "kubectl apply -R -f k8s/"
 │   ├── 00-namespace.yaml
 │   ├── 10-configmap.yaml
 │   ├── 11-secret.yaml
@@ -126,7 +128,9 @@ devsecops-agentic-platform/
 │   ├── 21-product-service.yaml
 │   ├── 22-order-service.yaml
 │   ├── 30-hpa.yaml
-│   └── 40-ingress.yaml
+│   ├── 40-ingress.yaml
+│   ├── rbac/serviceaccounts.yaml              # Phase 7 - one powerless ServiceAccount per service
+│   └── network-policies/network-policies.yaml # Phase 7 - default-deny + explicit allow rules
 ├── kind/
 │   └── kind-config.yaml      # cluster definition: port 80 -> host 8090
 ├── monitoring/               # Phase 6 - applied with "kubectl apply -R -f monitoring/"
@@ -402,7 +406,9 @@ smoke test (all three endpoints `ok (attempt 1)`, `POST /api/orders` → `"statu
 commit's `dev` CI run were reported **skipped**, not failed, which is the branch filter working as intended.
 
 Not verified, and not claimed: a remote (cloud) cluster — the project runs locally by design and no remote kubeconfig
-exists, so `cd.yml` targets a throwaway kind cluster on the runner only; and NetworkPolicies/RBAC, which arrive in Phase 7.
+exists, so `cd.yml` targets a throwaway kind cluster on the runner only. The RBAC and NetworkPolicies that Phase 7
+adds are applied by the very same step; whether they are *enforced* is a property of the CNI rather than of the
+manifest, and the [Phase 7 section](#devsecops-phase-7) says what was and was not demonstrated.
 
 ### CD
 
@@ -414,7 +420,7 @@ A run then:
 2. installs kind on the runner and creates a cluster from the same `kind/kind-config.yaml`,
 3. installs both add-ons with the same commands used on the laptop,
 4. pulls the images **by immutable tag** from GHCR — `sha-<commit>` — and loads them into the node,
-5. applies `k8s/`, then pins each Deployment to that tag with `kubectl set image`, so the live revision names the commit it runs,
+5. applies `k8s/` recursively (`kubectl apply -R -f k8s/`), so the Phase 7 ServiceAccounts and NetworkPolicies in the subdirectories go on too, then pins each Deployment to that tag with `kubectl set image`, so the live revision names the commit it runs,
 6. waits for the rollout and prints the image each Deployment ended up on,
 7. smoke-tests `/api/users`, `/api/products` and `POST /api/orders` through the Ingress on port 8090. Every call is retried (12 attempts, 5 s apart), because the Ingress can answer `502` for a moment right after a rollout, and a single late call must not roll back a healthy deploy.
 
@@ -809,7 +815,134 @@ service builds, the three image builds, the IaC lint and the combined `CI status
 
 ---
 
-## CI pipeline (Phase 2, extended in Phases 3, 5 and 6)
+## DevSecOps (Phase 7)
+
+Phase 6 made the platform **observable**. Phase 7 makes it **defensible**: the repository is scanned for committed secrets, for misconfiguration and for vulnerable dependencies, and the workloads themselves run with the least privilege the API server can express.
+
+| Tool | Pinned at | Scans | Lives in | Wants the network |
+|------|----------:|-------|----------|:-----------------:|
+| Trivy — `config` | `0.76.1` | Dockerfiles (the `DS-*` checks), Kubernetes YAML (`KSV-*`), Terraform, plus its own plain-text secret rules | [`security.yml`](.github/workflows/security.yml) → `config` | yes (vulnerability DB) |
+| Trivy — `image` | `0.76.1` | each built service image, with `--ignore-unfixed` | `security.yml` → `images` | yes |
+| gitleaks | `8.30.1` | every commit ever made **and** the working tree | `security.yml` → `secrets` | yes (release download) |
+| OWASP Dependency-Check | `dependency-check-maven:12.1.3` | each service's dependency tree against the NVD feed, `failBuildOnCVSS 7` | `security.yml` → `dependencies` | yes |
+| `check-security.py` | PyYAML | the posture the `k8s/**/*.yaml` files actually express | [`check-security.py`](.github/scripts/check-security.py), run by `ci.yml` | **no** |
+
+Every scanner is pinned by version in the workflow — bumping one is a deliberate commit, not a side effect of `latest` — and every scanner is downloaded as a release asset verified against the checksums that release publishes, because a security tool installed from an unverified download is a strange way to protect a repository.
+
+### Two questions, two workflows
+
+The split is deliberate, and the reason is the network.
+
+- [`ci.yml`](.github/workflows/ci.yml) asks *"does this YAML express the posture we meant?"* Its `security` job installs PyYAML and runs [`check-security.py`](.github/scripts/check-security.py) over every manifest under `k8s/`. It needs no cluster, no secret and no third-party endpoint, so it has the same reliability as the rest of CI and can run on every push.
+- [`security.yml`](.github/workflows/security.yml) asks *"is what we wrote actually clean?"* Trivy, gitleaks and Dependency-Check each fetch something from the internet, so living in `ci.yml` would make the everyday build depend on three external services staying up. They get a workflow of their own, which is also why it runs on a **weekly schedule** (`cron '0 6 * * 1'`): a dependency whose `pom.xml` has not changed can still acquire a CVE, and a scan that only ran on push would never see the day that happens.
+
+A scan that only prints is a report nobody reads, so all three fail the build on a finding — Trivy with `--exit-code 1` at `HIGH,CRITICAL`, gitleaks with `--exit-code 1`, Dependency-Check with `failBuildOnCVSS 7`. `Security status` is the single job to require in branch protection; it echoes all four results and names the one that failed.
+
+### What `check-security.py` asserts
+
+The cluster-free half of the phase is a linter over the manifests, in the same spirit as Phase 6's `check-monitoring.py` but pointed at the security posture:
+
+- **ServiceAccounts** — each one is in `devsecops`, carries `app.kubernetes.io/name` and `app.kubernetes.io/part-of`, and sets `automountServiceAccountToken: false`. The check is on the account *and* on every Pod spec, so a Pod that forgets the flag is caught even when the account is right.
+- **Workloads** — every Deployment names a ServiceAccount that exists and is not `default`, sets a Pod-level `automountServiceAccountToken: false` and `runAsNonRoot: true`, and every `envFrom`/value reference points at a ConfigMap or Secret key that is really there.
+- **Containers** — an explicitly tagged image (never `:latest`), a readiness probe, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`, and no literal secret-looking value in an `env`.
+- **NetworkPolicies** — in `devsecops`, with a `policyTypes` list, selecting a workload that actually exists; a `default-deny-all` policy is mandatory; and no rule may use an empty `namespaceSelector`/`podSelector`, which would silently allow the whole cluster.
+- **The things that must *not* be there** — a RoleBinding granting one of these three ServiceAccounts anything, or a literal credential in any ConfigMap/Secret under `k8s/`.
+
+### Least privilege: three identities that can do nothing
+
+[`k8s/rbac/serviceaccounts.yaml`](k8s/rbac/serviceaccounts.yaml) gives each service an identity of its own and no token:
+
+- by default a Pod runs as the namespace's `default` ServiceAccount and the kubelet mounts that account's bearer token into the container. None of the three services talks to the API server — they serve REST and read their own in-memory H2 database — so that token is pure liability: anything with code execution inside the container can present it to the API.
+- so each service gets its own ServiceAccount, which makes the identity visible in the audit log and lets one service be granted something later without widening the other two, and `automountServiceAccountToken: false` is set **both** on the account and on the Pod spec, so neither the account's default nor a Pod that forgets the flag brings the mount back.
+- there is deliberately **no Role and no RoleBinding**. "Nothing" is the entire grant, and that is what least privilege means for a workload that never calls the API. The Phase 9 agent is the one workload that does need the API; it gets its own read-only Role next to its own manifests rather than anything shared with these three.
+
+### NetworkPolicies: closed by default, then two doors
+
+[`k8s/network-policies/network-policies.yaml`](k8s/network-policies/network-policies.yaml) starts the namespace closed and opens exactly the doors something actually walks through:
+
+| Policy | Selects | Allows |
+|--------|---------|--------|
+| `default-deny-all` | every Pod (`podSelector: {}`) | nothing — both `Ingress` and `Egress` |
+| `allow-dns-egress` | every Pod | → `kube-system`, UDP+TCP 53 |
+| `allow-ingress-from-ingress-controller` | the platform Pods | ← `ingress-nginx`, ports 8081/8082/8083 |
+| `allow-metrics-scrape-from-monitoring` | the platform Pods | ← `monitoring`, ports 8081/8082/8083 |
+| `allow-order-service-to-call-others` | `order-service` | → `user-service:8081`, → `product-service:8082` |
+
+The alternative — leave the namespace open and block known-bad traffic — cannot work, because the interesting traffic is the traffic you did not think of. Return traffic is not listed anywhere: NetworkPolicy is stateful, so a reply on an allowed connection is allowed by default. The ports are **container** ports, not Service ports, because the policy applies to packets hitting the Pod, after the Service has done its port mapping. `kubernetes.io/metadata.name` identifies a namespace without anyone having to label it by hand (the API server has set it on every Namespace since 1.21).
+
+**The caveat that matters:** kind's default CNI, `kindnetd`, accepts these objects but does not enforce them. They are real and correct, and they take effect the moment the cluster in front of them runs a policy-capable CNI (Calico, Cilium, kube-router) — on the stock laptop cluster they are inert. So "the policies are applied" is not the same claim as "the policies are enforced", and Phase 7 only makes the first one. To find out which one you have:
+
+```bash
+# 1. Which CNI put the Pods on the network?
+kubectl -n kube-system get pods -o name | grep -E 'calico|cilium|kube-router|kindnet'
+#    kindnet -> accepted, not enforced.  Calico/Cilium/kube-router -> enforced.
+
+# 2. Prove it with traffic rather than with the CNI's name. default-deny-all
+#    has no rule allowing this Pod at all, so the call must fail:
+kubectl -n devsecops run probe --rm -it --restart=Never \
+  --image=curlimages/curl:8.10.1 -- \
+  curl -sS --max-time 5 http://user-service:8081/actuator/health
+#    "Connection timed out"      -> enforced
+#    HTTP 200 with the health JSON -> not enforced (a stock kind cluster)
+```
+
+Kubelet traffic is deliberately unmentioned: health probes come from the node rather than from a Pod, and CNIs disagree about how to treat them, so a rule that tried to allow "just the kubelet" would be guessing.
+
+### Ownership
+
+| Tool | Owns | Lives in |
+|------|------|----------|
+| Terraform | `Namespace/devsecops` — unchanged from Phase 5 | [`terraform/namespace.tf`](terraform/namespace.tf) |
+| Ansible | The **contents** of `k8s/`, including the Phase 7 directories | [`roles/deploy`](ansible/playbooks/roles/deploy/tasks/main.yml) |
+| `cd.yml` | Applying the same manifests in CI | [`.github/workflows/cd.yml`](.github/workflows/cd.yml) |
+| The manifests | The ServiceAccounts and NetworkPolicies themselves | [`k8s/`](k8s) |
+
+Both apply paths were **fixed** in this phase, and the fix is the reason the phase is trustworthy: `kubectl apply -f k8s/` is non-recursive, so a plain apply silently skips `k8s/rbac/` and `k8s/network-policies/`; the Ansible role had the same gap, because `fileglob` only expands the last path segment. `cd.yml` now runs `kubectl apply -R -f k8s/`, and the deploy role discovers the manifests with `find(recurse=true)` and applies the identities and policies **first**, in a pass of its own, before the workloads. That ordering is what keeps the two facts honest: the manifests are in the repository *and* they reach the cluster.
+
+### What has actually been tested
+
+Verified on this laptop (Trivy `0.76.1` and gitleaks `8.30.1`, both the official Windows builds, each downloaded and checked against its release's published SHA-256):
+
+| Check | Result |
+|-------|--------|
+| `python .github/scripts/check-security.py` | `OK: 10 file(s), 21 document(s), 3 service account(s), 3 workload(s), 5 network policy(ies)`, exit 0 |
+| `check-security.py` on injected defects (1) | `FAILED: 3 problem(s)` — a literal `SPRING_DATASOURCE_PASSWORD`, a Deployment on the `default` account, a `:latest` image — exit 1 |
+| `check-security.py` on injected defects (2) | `FAILED: 2 problem(s)` — an empty `namespaceSelector`, and a NetworkPolicy selecting a workload that does not exist — exit 1 |
+| gitleaks — history | `gitleaks git` → `15 commits scanned`, `no leaks found`, exit 0 |
+| gitleaks — working tree | `gitleaks dir` → `no leaks found`, exit 0 |
+| Trivy — config | `trivy config --severity HIGH,CRITICAL --exit-code 1 .` → exit 0, every target `0` misconfigurations, **including `ansible/Dockerfile`** after its `USER 1001` fix (the `DS-0002` finding that motivated it is gone — verified, not assumed) |
+| Dependency-Check declaration | `mvn -B -ntp validate` on all three poms → exit 0, so the plugin block resolves |
+| Workflow/manifest syntax | `ci.yml`, `cd.yml`, `security.yml`, both Ansible task files and the two new manifests parse as valid YAML |
+
+Two negative tests were run on purpose, because a linter that has only ever passed is a linter nobody should trust.
+
+**Blocked, and therefore not claimed:**
+
+| Not verified | Why |
+|--------------|-----|
+| `trivy image` on the three service images | Docker Desktop's Linux engine answers HTTP 500 on this host (`C:` was down to 0.57 GB free; emptying `%TEMP%` raised it to 1.98 GB but the engine did not recover), so `docker build` cannot run locally. The `images` job is the only place an image is ever scanned. |
+| OWASP Dependency-Check against the NVD feed | The feed is large and rate-limited without `NVD_API_KEY`; running it locally would prove the feed, not the repository. It runs in the `dependencies` job. |
+| Applying the ServiceAccounts/NetworkPolicies to a live cluster, and enforcement | The manifests need a cluster, the engine above is down, and even a working laptop cluster runs `kindnetd`, which does not enforce them — see the check above. |
+| `ansible-playbook` / `ansible-lint` for the changed deploy role | `ansible-core` cannot run on Windows (`OSError: [WinError 87]`), and `ansible-lint` imports the POSIX-only `grp` module. The change is exercised by CI's `iac` job and by the Debian control-node container instead. |
+| A real GitHub Actions run of `security.yml` | The workflow is not pushed yet; the first run happens with the Phase 7 commit. |
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `trivy config` dies with `FATAL Fatal error: unknown flag: --no-progress` | Trivy 0.76 removed the flag; it is a hard failure now, not a warning. Use `--quiet`, which still prints the report and only drops the progress bar. |
+| `trivy image` reports a HIGH in a package the base image ships and nobody can upgrade | Add `--ignore-unfixed`. A gate nobody can act on gets switched off, and the point of this one is that it stays on. |
+| gitleaks fails on a value that is no longer in any file | The clone still carries the history: `gitleaks git` reads every commit, which is exactly the leak that "I deleted the file" misses. Rotate the credential first, then either rewrite the history or add a justified entry to `.gitleaks.toml`. |
+| Dependency-Check takes 40 minutes or the NVD answers `403` | The public feed is rate-limited. Set the repository secret `NVD_API_KEY`; the job notices when it is absent instead of failing. |
+| The ServiceAccounts and NetworkPolicies exist in Git but not in the cluster | A non-recursive apply. `kubectl apply -f k8s/` silently skips `k8s/rbac/` and `k8s/network-policies/` — `kubectl apply -R -f k8s/` is required, and the Ansible role needs the same treatment. |
+| `kubectl -n devsecops get networkpolicy` lists all five policies but traffic is unaffected | The CNI does not enforce policy. Check with the two commands above; `kindnetd` is the usual answer. |
+| A Pod can no longer resolve `user-service` | `default-deny-all` denies egress to everything, DNS included. `allow-dns-egress` is what restores `kube-system:53` over UDP **and** TCP. |
+| A Pod cannot reach the internet, so something in the image fails | That is the intended state. Add a specific egress rule for the destination that is really needed rather than removing `default-deny-all`. |
+| A Pod starts with more permission than intended, or `default` account shows in an audit log | A Pod that omits `serviceAccountName`, or sets it but forgets the Pod-level `automountServiceAccountToken: false`. `check-security.py` fails the build on both. |
+
+---
+
+## CI pipeline (Phase 2, extended in Phases 3, 5, 6 and 7)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
@@ -819,7 +952,8 @@ service builds, the three image builds, the IaC lint and the combined `CI status
 | `docker` (matrix: 3 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
 | `iac` | Phase 5 — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, then `ansible-playbook --syntax-check` and `ansible-lint` on both playbooks. Runs against no cluster |
 | `monitoring` | Phase 6 — installs PyYAML and runs `.github/scripts/check-monitoring.py`, a cluster-free linter over `monitoring/*.yaml`: valid YAML, no `Namespace` object where Terraform owns one, every workload pinned to `monitoring` with tagged images, resource requests/limits, readiness probes and no literal secret values, and every alert rule carrying `expr`/`severity`/`annotations.summary` |
-| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker`, `iac` or `monitoring` failed |
+| `security` | Phase 7 — installs PyYAML and runs `.github/scripts/check-security.py`, a cluster-free linter over `k8s/**/*.yaml`: every workload on a real, non-`default` ServiceAccount with no mounted token and `runAsNonRoot`, tagged images with readiness probes and dropped capabilities, no literal secrets, and the ServiceAccounts/NetworkPolicies themselves (a `default-deny-all` is mandatory, and no policy may select a workload that does not exist) |
+| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker`, `iac`, `monitoring` or `security` failed |
 
 Design notes:
 
@@ -832,6 +966,7 @@ Design notes:
 - **`docker` is skipped on pull requests** and only pushes from `main`/`v*` tags, so feature branches still prove the Dockerfile builds without publishing a moving `latest` tag.
 - **`iac` needs no cluster.** `terraform init -backend=false` plus `validate` only needs the providers, and `--syntax-check`/`ansible-lint` only read the playbooks, so the job is fast and deterministic and never depends on a live API server. The `ansible` toolchain is pinned by [`ansible/requirements.txt`](ansible/requirements.txt) and [`ansible/requirements.yml`](ansible/requirements.yml), the same files the local container image installs from — so CI lints with the same versions as the laptop.
 - **`monitoring` needs no cluster either.** The manifests are linted statically by [`check-monitoring.py`](.github/scripts/check-monitoring.py) (its only dependency, `PyYAML`, is pinned in [`.github/scripts/requirements.txt`](.github/scripts/requirements.txt)), so the job catches the mistakes that are cheap to make in YAML — an untagged image, a missing probe, a rule with no `expr` — without standing up a kind cluster on a GitHub runner. That the stack actually comes up and the pipeline flows end to end was verified on the local cluster; see the "What has actually been tested" table above.
+- **`security` is the Phase 7 half that needs no network**, by the same argument: [`check-security.py`](.github/scripts/check-security.py) asserts the posture the manifests express — identities, dropped tokens, probes, capabilities, and the NetworkPolicies' own correctness — from the files alone. The scanners that *do* need the network (Trivy, gitleaks, Dependency-Check) are deliberately kept out of `ci.yml` and live in [`.github/workflows/security.yml`](.github/workflows/security.yml), so this workflow never depends on an external feed staying up. See the [Phase 7 section](#devsecops-phase-7).
 
 The badge at the top of this README reflects the `main` branch run.
 

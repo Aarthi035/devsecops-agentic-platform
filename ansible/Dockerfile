@@ -50,10 +50,28 @@ RUN apt-get update \
 
 COPY requirements.txt requirements.yml /tmp/
 
+# The collections go to /usr/share/ansible/collections rather than the default
+# ~/.ansible/collections: that default is /root's home, and a collection tree
+# under /root is invisible to the non-root user the final stage switches to.
+# /usr/share/ansible/collections is the other directory ansible searches by
+# default (COLLECTIONS_PATHS), so nothing has to be configured to find it.
 RUN pip install --no-cache-dir "ansible-core>=2.16,<2.19" -r /tmp/requirements.txt \
-    && ansible-galaxy collection install -r /tmp/requirements.yml
+    && ansible-galaxy collection install -r /tmp/requirements.yml \
+         --collections-path /usr/share/ansible/collections
 
 WORKDIR /workspace/ansible
+
+# Phase 7: nothing in a playbook run needs root - the API credential is mounted
+# read-only and the manifests are read from a bind mount - so the control node
+# drops to its own unprivileged user. Trivy's DS-0002 check fails the security
+# workflow on any image whose final stage has no USER, and "run the automation
+# as root because it is convenient" is exactly the habit that check exists to
+# catch. HOME is set explicitly because ansible keeps its temp trees under
+# ~/.ansible/tmp and the local connection writes into them on every task.
+RUN useradd --create-home --uid 1001 ansible
+ENV HOME=/home/ansible
+
+USER 1001
 
 ENTRYPOINT ["ansible-playbook"]
 CMD ["--help"]

@@ -30,18 +30,43 @@
       ../k8s/00-namespace.yaml" if you are not using Terraform.
     success_msg: "Namespace '{{ platform_namespace }}' is present."
 
-# query() is lookup(..., wantlist=True): it returns a real list of paths.
-# lookup() on its own returns a comma-joined string, which "| sort" would then
-# turn into a list of single characters.
+# find(..., recurse=true) rather than fileglob: from Phase 7 the manifests are
+# no longer all in one directory. k8s/rbac/ and k8s/network-policies/ are
+# subdirectories, and fileglob only expands the last segment of its pattern -
+# which is exactly how the ServiceAccounts and the default-deny NetworkPolicy
+# sat in the repository, looked correct, and never reached a cluster.
 - name: Find every manifest in the k8s directory
+  ansible.builtin.find:
+    paths: "{{ k8s_dir }}"
+    patterns: "*.yaml"
+    recurse: true
+  register: platform_manifest_files
+  changed_when: false
+
+- name: Collect the manifest paths
   ansible.builtin.set_fact:
-    platform_manifests: "{{ query('ansible.builtin.fileglob', k8s_dir ~ '/*.yaml') | sort }}"
+    platform_manifests: "{{ platform_manifest_files.files | map(attribute='path') | sort }}"
+
+# Two passes, because these resources genuinely have an order. A Pod created
+# before its ServiceAccount exists is rejected by the API and retried by the
+# ReplicaSet controller, and a Pod created before its NetworkPolicy exists is
+# briefly unrestricted. Both converge, but neither is the state the manifests
+# describe, and the second one is the whole point of the phase. The split is on
+# the parent directory - where the Phase 7 objects live - not on a
+# hand-maintained list of file names.
+- name: Apply the ServiceAccounts and NetworkPolicies first
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: "{{ platform_manifests | select('search', '/(rbac|network-policies)/') | list }}"
+  loop_control:
+    label: "{{ item | basename }}"
 
 - name: Apply the workload manifests
   kubernetes.core.k8s:
     state: present
     src: "{{ item }}"
-  loop: "{{ platform_manifests }}"
+  loop: "{{ platform_manifests | reject('search', '/(rbac|network-policies)/') | list }}"
   when: (item | basename) not in k8s_owned_elsewhere
   loop_control:
     label: "{{ item | basename }}"

@@ -262,11 +262,49 @@ jobs:
       - name: Validate the monitoring manifests
         run: python3 .github/scripts/check-monitoring.py
 
+  # Phase 7: the same treatment for the security posture. Trivy, gitleaks and
+  # Dependency-Check run in .github/workflows/security.yml, because they need
+  # the network; what runs here is the part of the phase that is a property of
+  # the YAML itself.
+  #
+  # .github/scripts/check-security.py asserts those properties on every
+  # manifest under k8s/, so a mistake that would only show up as a Pod that
+  # starts with more permission than it needs fails the build instead: a
+  # workload on the 'default' account, a mounted token, a Pod without
+  # runAsNonRoot, a NetworkPolicy that selects a workload that does not exist,
+  # a rule that accidentally allows everything, a RoleBinding that grants one
+  # of these service accounts a permission it is supposed to not have.
+  #
+  # It also checks the two Phase 7 directories are actually reachable:
+  # a non-recursive glob over k8s/ is exactly the mistake that left
+  # k8s/rbac/ and k8s/network-policies/ unapplied. Run it locally with:
+  #
+  #   python3 .github/scripts/check-security.py
+  security:
+    name: Security config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --disable-pip-version-check -r .github/scripts/requirements.txt
+
+      - name: Validate the RBAC and NetworkPolicy manifests
+        run: python3 .github/scripts/check-security.py
+
   # Single check to require in branch protection: it fails if any matrix leg failed.
   ci-status:
     name: CI status
     if: always()
-    needs: [build, docker, iac, monitoring]
+    needs: [build, docker, iac, monitoring, security]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed
@@ -275,6 +313,7 @@ jobs:
           echo "docker matrix result: ${{ needs.docker.result }}"
           echo "iac result: ${{ needs.iac.result }}"
           echo "monitoring result: ${{ needs.monitoring.result }}"
+          echo "security result: ${{ needs.security.result }}"
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::One or more service builds did not succeed."
             exit 1
@@ -290,5 +329,9 @@ jobs:
           fi
           if [ "${{ needs.monitoring.result }}" != "success" ]; then
             echo "::error::The monitoring configuration checks did not succeed."
+            exit 1
+          fi
+          if [ "${{ needs.security.result }}" != "success" ]; then
+            echo "::error::The RBAC or NetworkPolicy checks did not succeed."
             exit 1
           fi

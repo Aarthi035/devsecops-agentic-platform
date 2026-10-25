@@ -1,0 +1,164 @@
+# Phase 7 - east-west traffic in the devsecops namespace.
+#
+# The namespace starts closed ("default-deny-all") and every rule below opens
+# exactly one door that something in the platform actually walks through. The
+# alternative - leaving it open and blocking known-bad traffic - cannot work,
+# because the interesting traffic is the traffic you did not think of.
+#
+# What actually talks to what, and therefore what is allowed:
+#
+#   * ingress-nginx  -> the three services   the Ingress is the only way in
+#                                            from outside the cluster
+#   * Prometheus     -> the three services   /actuator/prometheus scraping
+#   * order-service  -> user-service:8081    POST /api/orders fetches the user
+#                    -> product-service:8082 then the product
+#   * everything     -> kube-dns:53          resolving "user-service" etc.
+#
+# and nothing else: no service may reach the API server, the internet, the
+# monitoring namespace, or each other, beyond the two calls order-service
+# makes. Return traffic is not listed anywhere - NetworkPolicy is stateful, so
+# a reply to an allowed connection is allowed by default.
+#
+# Label selectors worth knowing:
+#   * "kubernetes.io/metadata.name" is put on every Namespace by the API
+#     server since 1.21, so it identifies a namespace without anyone having to
+#     label it by hand.
+#   * "ports" below are *container* ports (8081/8082/8083), not Service ports.
+#     A policy applies to packets hitting the Pod, which is after the Service
+#     has already done its port mapping.
+#
+# One caveat, because it matters and is easy to miss: kind's default CNI
+# (kindnetd) accepts these objects but does not enforce them. They are real
+# and correct, and they take effect the moment the cluster runs a
+# policy-capable CNI (Calico, Cilium, kube-router); on the stock laptop
+# cluster they are inert. See the Phase 7 README section for how to check
+# whether the CNI in front of you enforces them.
+#
+# kubelet traffic is deliberately not mentioned. Health probes come from the
+# node, not from a Pod, and how a CNI treats them varies, so a policy that
+# tried to allow "just the kubelet" would be guessing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  # {} selects every Pod in the namespace, including ones added later.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress: [] and no egress: [] - the absence of rules is the deny.
+---
+# Without this the closed namespace cannot resolve a single Service name, and
+# order-service would fail on "user-service" before it made a request.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The Ingress controller is the only legitimate way in from outside.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-ingress-controller
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: devsecops-platform
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+---
+# Prometheus scrapes /actuator/prometheus on every service. It lives in the
+# monitoring namespace, so the allow is scoped to that namespace rather than
+# to the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape-from-monitoring
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: devsecops-platform
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+---
+# order-service is the only service that calls another one. Both targets are
+# inside this namespace, so the two rules are pod-to-pod, not namespace-wide.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-service-to-call-others
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: order-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: user-service
+      ports:
+        - protocol: TCP
+          port: 8081
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: product-service
+      ports:
+        - protocol: TCP
+          port: 8082

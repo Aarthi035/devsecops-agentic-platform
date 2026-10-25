@@ -1,0 +1,308 @@
+name: Security
+
+# Phase 7: the scanners.
+#
+# This workflow is deliberately separate from ci.yml. Every ci.yml job can pass
+# on a machine with no cluster, no secrets and no network: it builds, tests and
+# lints what is in the repository. The scanners here are the opposite - they
+# download the NVD feed, the Trivy vulnerability database and the gitleaks
+# rules - so putting them in ci.yml would make the everyday build depend on
+# three third-party endpoints staying up.
+#
+# The split is therefore:
+#
+#   ci.yml        "Security config"     does this YAML express the posture we
+#                                       meant? (check-security.py, no cluster,
+#                                       no network) - a review question.
+#   security.yml  secrets / config /    is what we wrote actually clean?
+#                 images / dependencies (gitleaks, Trivy, Dependency-Check) -
+#                                       a scanning question.
+#
+# The weekly schedule matters as much as the push trigger: a dependency whose
+# pom.xml has not changed can still acquire a CVE, and a scan that only runs on
+# a push would never see the day it happens. The run is also the only place
+# that fails on that CVE, which is why the schedule exists at all.
+
+on:
+  push:
+    branches: [main, dev, 'feature/**']
+  pull_request:
+    branches: [main, dev]
+  # Monday 06:00 UTC - after the weekend, before the week's first merge.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Least privilege: every job here only reads the repository. Nothing pushes an
+# image or writes a comment, so "contents: read" is the whole permission set -
+# including for the dependency-check job, whose reports are uploaded as
+# workflow artifacts rather than committed.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_ARGS: '-B -ntp'
+  # Pinned to the versions the laptop run was verified against, so a green CI
+  # result and a green local result mean the same thing. Bumping either here is
+  # a deliberate act, not a side effect of "latest".
+  TRIVY_VERSION: '0.76.1'
+  GITLEAKS_VERSION: '8.30.1'
+
+jobs:
+  # Secrets in the history and in the working tree. This is the check that
+  # k8s/11-secret.yaml leans on: the file ships "stringData: {}" on purpose,
+  # because committing a working credential is exactly what this job catches.
+  secrets:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # gitleaks reads the commit history, and a shallow clone would hide
+          # the one commit where a token was added and then removed - the exact
+          # case that "it is not in the tree anymore" arguments miss.
+          fetch-depth: 0
+
+      # The release tarball is verified against the checksums the release
+      # itself publishes before anything is executed. A scanner that is
+      # installed from an unverified download is a strange way to protect a
+      # repository.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "/tmp/${asset}" "${base}/${asset}"
+          curl -fsSLo /tmp/gitleaks_checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          (cd /tmp && grep "${asset}" gitleaks_checksums.txt | sha256sum -c -)
+          tar -xzf "/tmp/${asset}" -C "$HOME/.local/bin" gitleaks
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gitleaks" version
+
+      # Two scans, both reported, so one push shows the whole picture rather
+      # than stopping at the first finding:
+      #   git - every commit ever made (the leak that was "cleaned up")
+      #   dir - the files as they are now, including ones .gitignore hides
+      # --redact keeps the matched secret out of the log; the SARIF files hold
+      # the finding, and they are uploaded rather than printed.
+      - name: Scan the history and the working tree
+        run: |
+          status=0
+          gitleaks git --no-banner --redact \
+            --report-format sarif --report-path gitleaks-git.sarif --exit-code 1 || status=1
+          gitleaks dir --no-banner --redact \
+            --report-format sarif --report-path gitleaks-dir.sarif --exit-code 1 || status=1
+          exit "${status}"
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-reports
+          path: gitleaks-*.sarif
+          retention-days: 7
+          if-no-files-found: warn
+
+  # Misconfiguration, which is where the Dockerfile and the manifests get
+  # read: Trivy's config scanner understands Dockerfiles (the DS-* checks),
+  # Kubernetes YAML (the KSV-* checks) and Terraform. "Run as root" is the
+  # finding this caught on the Ansible control node's Dockerfile.
+  #
+  # It is also the second opinion on secrets-in-plain-text: Trivy's built-in
+  # secret rules cover secrets in files gitleaks' history scan does not look
+  # at, so the two are complementary rather than redundant.
+  config:
+    name: Config (trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "/tmp/${asset}" "${base}/${asset}"
+          curl -fsSLo /tmp/trivy_checksums.txt "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd /tmp && grep "${asset}" trivy_checksums.txt | sha256sum -c -)
+          tar -xzf "/tmp/${asset}" -C "$HOME/.local/bin" trivy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/trivy" --version
+
+      # --exit-code 1: a HIGH/CRITICAL finding fails the job. A security scan
+      # that only prints is a report nobody reads.
+      #
+      # --quiet, not --no-progress: Trivy 0.76 replaced the old flag, and
+      # "--no-progress" is now a hard "unknown flag" failure rather than a
+      # warning. --quiet still prints the report; it only drops the progress
+      # bar and the log lines around it.
+      - name: Scan for misconfiguration and committed secrets
+        run: |
+          trivy config \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --quiet \
+            --format table \
+            .
+
+  # The image is the third artefact of this project after the jar and the
+  # manifests, and the only one whose contents (the JRE, the OS packages) the
+  # repository does not control. Scanning the base image is the only way a CVE
+  # in it ever surfaces before it is deployed.
+  images:
+    name: Image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      # One service's base image failing must not hide the other two.
+      fail-fast: false
+      matrix:
+        service: [user-service, product-service, order-service]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "/tmp/${asset}" "${base}/${asset}"
+          curl -fsSLo /tmp/trivy_checksums.txt "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd /tmp && grep "${asset}" trivy_checksums.txt | sha256sum -c -)
+          tar -xzf "/tmp/${asset}" -C "$HOME/.local/bin" trivy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/trivy" --version
+
+      # The same build ci.yml's docker job does, with no push: this job must
+      # work on a pull request, where the image is never published.
+      - name: Build the image
+        run: |
+          docker build \
+            --tag "devsecops/${{ matrix.service }}:scan" \
+            --file "services/${{ matrix.service }}/Dockerfile" \
+            "services/${{ matrix.service }}"
+
+      # --ignore-unfixed is the difference between a useful gate and one that
+      # fails every build: a HIGH in a package the base image ships with no fix
+      # for cannot be acted on, and a gate that nobody can act on gets disabled.
+      - name: Scan the image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --quiet \
+            "devsecops/${{ matrix.service }}:scan"
+
+  # OWASP Dependency-Check reads the Maven dependency tree against the NVD feed.
+  # The plugin is declared in each service's pom.xml but not bound to a
+  # lifecycle phase, so this job is the only place it runs - and the only place
+  # the NVD database can be cached between runs.
+  dependencies:
+    name: Dependencies (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [user-service, product-service, order-service]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: services/${{ matrix.service }}/pom.xml
+
+      # The NVD database is the slow part of this scan (hundreds of MB, fetched
+      # from a rate-limited API). Caching it is what makes the scan tolerable
+      # on a pull request. The key does not include the pom's hash: the feed
+      # changes on its own schedule, not when the dependencies do, so the
+      # cache is restored and refreshed rather than rebuilt per dependency bump.
+      - name: Cache the NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check-data
+          key: dependency-check-${{ runner.os }}
+          restore-keys: |
+            dependency-check-${{ runner.os }}
+
+      # NVD_API_KEY is a repository secret. When it is absent the scan still
+      # runs - the plugin's "no key" path is a slower, rate-limited feed, which
+      # is exactly what a fork's pull request gets, since GitHub does not pass
+      # secrets to workflows triggered from a fork.
+      - name: Run OWASP Dependency-Check
+        working-directory: services/${{ matrix.service }}
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "${NVD_API_KEY}" ]; then
+            echo "::notice::NVD_API_KEY is not set - falling back to the rate-limited public NVD feed."
+            echo "::notice::Set it in Settings > Secrets and variables > Actions to speed this up."
+          else
+            echo "Using the NVD API key provided by the repository secret."
+          fi
+          mvn $MAVEN_ARGS -Dnvd.api.key="${NVD_API_KEY}" dependency-check:check
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-${{ matrix.service }}
+          path: services/${{ matrix.service }}/target/dependency-check-report.*
+          retention-days: 7
+          if-no-files-found: warn
+
+  # Single check to require in branch protection: it fails if any scan failed.
+  security-status:
+    name: Security status
+    if: always()
+    needs: [secrets, config, images, dependencies]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any scan failed
+        run: |
+          echo "secrets result: ${{ needs.secrets.result }}"
+          echo "config result: ${{ needs.config.result }}"
+          echo "images result: ${{ needs.images.result }}"
+          echo "dependencies result: ${{ needs.dependencies.result }}"
+          if [ "${{ needs.secrets.result }}" != "success" ]; then
+            echo "::error::gitleaks found a secret, or the scan did not complete."
+            exit 1
+          fi
+          if [ "${{ needs.config.result }}" != "success" ]; then
+            echo "::error::Trivy found a HIGH/CRITICAL misconfiguration, or the scan did not complete."
+            exit 1
+          fi
+          if [ "${{ needs.images.result }}" != "success" ]; then
+            echo "::error::A service image has a fixable HIGH/CRITICAL vulnerability, or the scan did not complete."
+            exit 1
+          fi
+          if [ "${{ needs.dependencies.result }}" != "success" ]; then
+            echo "::error::Dependency-Check found a dependency above the CVSS threshold, or the scan did not complete."
+            exit 1
+          fi

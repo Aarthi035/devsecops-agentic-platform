@@ -24,6 +24,11 @@ spec:
         app.kubernetes.io/name: product-service
         app.kubernetes.io/part-of: devsecops-platform
     spec:
+      # Phase 7: this service never calls the Kubernetes API, so it runs under
+      # its own ServiceAccount (k8s/rbac/serviceaccounts.yaml) and the kubelet
+      # does not mount a token into the container at all.
+      serviceAccountName: product-service
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001

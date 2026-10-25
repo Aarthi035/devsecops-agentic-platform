@@ -125,7 +125,7 @@ jobs:
             docker pull "${PREFIX}/${svc}:${IMAGE_TAG}"
             # Two tags per service: the immutable one identifies the commit the
             # Deployment runs, the manifest's own 1.0.0 tag is loaded as well so
-            # the plain "kubectl apply -f k8s/" below never leaves a container
+            # the "kubectl apply -R -f k8s/" below never leaves a container
             # waiting on an image that is not on the node.
             docker tag "${PREFIX}/${svc}:${IMAGE_TAG}" "devsecops/${svc}:${IMAGE_TAG}"
             docker tag "${PREFIX}/${svc}:${IMAGE_TAG}" "devsecops/${svc}:1.0.0"
@@ -135,7 +135,12 @@ jobs:
 
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply -f k8s/
+          # -R (recursive) is required from Phase 7 onwards: k8s/rbac/ and
+          # k8s/network-policies/ are subdirectories, and a plain "-f k8s/"
+          # silently skips them. That is how the ServiceAccounts and the
+          # default-deny NetworkPolicy could sit in the repository, look
+          # correct, and never be applied to a cluster.
+          kubectl apply -R -f k8s/
           # Pin every Deployment to the commit's tag. Applying the manifests
           # alone would leave them on the fixed 1.0.0 tag, which hides which
           # revision is live and makes a rolling update a no-op.
