@@ -24,8 +24,8 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | done |
 | 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | done |
 | 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | done |
-| 9 | Agent v2 (Prometheus/Loki/kubectl/Trivy tools, `/alert`, approval gate, audit log) | pending |
-| 10 | Evals, Langfuse tracing, Grafana agent panel, demo scripts, report | pending |
+| 9 | Agent v2 (Prometheus/Loki/kubectl/Trivy tools, `/alert`, approval gate, audit log) | done |
+| 10 | Evals, Langfuse tracing, Grafana agent panel, demo scripts, report | done |
 
 ---
 
@@ -1097,7 +1097,35 @@ Two of those are worth calling out as negative tests, because a test suite that 
 
 ---
 
-## CI pipeline (Phase 2, extended in Phases 3, 5, 6, 7 and 8)
+## Phase 10: Evaluation, tracing, and demonstration
+
+Phase 10 closes the feedback loop around the agent. The repository now contains:
+
+| Deliverable | Location |
+|-------------|----------|
+| Twelve deterministic failure scenarios and scorer | [`evals/scenarios.json`](evals/scenarios.json), [`evals/run_evals.py`](evals/run_evals.py) |
+| CI evaluation job | [`.github/workflows/ci.yml`](.github/workflows/ci.yml), job `evals` |
+| Agent metrics and trace sinks | [`services/agent-service/src/main/java/com/devsecops/agentservice/tracing`](services/agent-service/src/main/java/com/devsecops/agentservice/tracing) |
+| Grafana agent dashboard | [`monitoring/grafana/dashboards/platform-overview.yaml`](monitoring/grafana/dashboards/platform-overview.yaml) |
+| Architecture and report outline | [`docs/architecture.md`](docs/architecture.md), [`docs/report-outline.md`](docs/report-outline.md) |
+| End-to-end demo runbook | [`docs/demo-scripts.md`](docs/demo-scripts.md) |
+
+The evaluator starts a local GitHub API stub, calls the running agent over HTTP, and scores root cause, evidence, recommended action, tool count, and estimated cost. It uses the heuristic provider so CI remains deterministic and requires no model or credential:
+
+```bash
+cd services/agent-service
+AGENT_LLM_PROVIDER=heuristic \
+AGENT_GITHUB_API_URL=http://127.0.0.1:8765 \
+AGENT_GITHUB_COMMENT_ENABLED=false \
+mvn spring-boot:run
+
+# In a second terminal, from the repository root:
+python3 evals/run_evals.py --agent-url http://127.0.0.1:8085
+```
+
+Tracing defaults to structured log output, which Promtail ships to Loki. Set `AGENT_TRACING_MODE=langfuse` plus the Langfuse public and secret keys to export traces asynchronously; set it to `off` to retain metrics without exporting trace events. Estimated cost is derived from configured model/tool rates and is explicitly not an invoice.
+
+## CI pipeline (Phase 2, extended in Phases 3, 5, 6, 7, 8 and 10)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
@@ -1108,7 +1136,8 @@ Two of those are worth calling out as negative tests, because a test suite that 
 | `iac` | Phase 5 — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, then `ansible-playbook --syntax-check` and `ansible-lint` on both playbooks. Runs against no cluster |
 | `monitoring` | Phase 6 — installs PyYAML and runs `.github/scripts/check-monitoring.py`, a cluster-free linter over `monitoring/*.yaml`: valid YAML, no `Namespace` object where Terraform owns one, every workload pinned to `monitoring` with tagged images, resource requests/limits, readiness probes and no literal secret values, and every alert rule carrying `expr`/`severity`/`annotations.summary` |
 | `security` | Phase 7 — installs PyYAML and runs `.github/scripts/check-security.py`, a cluster-free linter over `k8s/**/*.yaml`: every workload on a real, non-`default` ServiceAccount with no mounted token and `runAsNonRoot`, tagged images with readiness probes and dropped capabilities, no literal secrets, and the ServiceAccounts/NetworkPolicies themselves (a `default-deny-all` is mandatory, and no policy may select a workload that does not exist) |
-| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker`, `iac`, `monitoring` or `security` failed |
+| `evals` | Phase 10 — builds the agent, starts it with the deterministic heuristic provider, and runs all 12 scenarios against a local GitHub API stub |
+| `ci-status` | Single gate for branch protection — fails if **any** of `build`, `docker`, `iac`, `monitoring`, `security` or `evals` failed |
 
 Design notes:
 
@@ -1193,6 +1222,6 @@ Every PR must state how it was verified and confirm no secrets were committed.
 |----------|----------|
 | [PROJECT_SPEC.md](PROJECT_SPEC.md) | Full project specification, phases, evaluation plan |
 | [docs/prerequisites.md](docs/prerequisites.md) | Tools, versions, install and verification commands |
-| `docs/architecture.md` | Mermaid architecture diagram (Phase 1+) |
-| `docs/report-outline.md` | Report structure (Phase 10) |
-| `docs/demo-scripts.md` | Step-by-step demo runbook (Phase 10) |
+| [docs/architecture.md](docs/architecture.md) | Mermaid architecture diagram and trust boundaries |
+| [docs/report-outline.md](docs/report-outline.md) | Report structure and evaluation evidence |
+| [docs/demo-scripts.md](docs/demo-scripts.md) | Step-by-step demo runbook |

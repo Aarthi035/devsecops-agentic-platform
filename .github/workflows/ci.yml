@@ -300,11 +300,64 @@ jobs:
       - name: Validate the RBAC and NetworkPolicy manifests
         run: python3 .github/scripts/check-security.py
 
+  # Phase 10: exercise the agent over HTTP against a local GitHub API stub.
+  # The heuristic provider keeps this deterministic and needs no secret,
+  # Ollama model or Kubernetes cluster.
+  evals:
+    name: Agent evaluations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: services/agent-service/pom.xml
+
+      - name: Build the agent
+        working-directory: services/agent-service
+        run: mvn $MAVEN_ARGS package -DskipTests
+
+      - name: Start the heuristic agent
+        working-directory: services/agent-service
+        env:
+          AGENT_LLM_PROVIDER: heuristic
+          AGENT_GITHUB_API_URL: http://127.0.0.1:8765
+          AGENT_GITHUB_COMMENT_ENABLED: 'false'
+        run: |
+          java -jar target/agent-service-1.0.0.jar > /tmp/agent-service.log 2>&1 &
+          echo $! > /tmp/agent-service.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8085/actuator/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/agent-service.log
+          exit 1
+
+      - name: Run the 12 deterministic scenarios
+        run: python3 evals/run_evals.py --agent-url http://127.0.0.1:8085 --mock-port 8765
+
+      - name: Show agent log on failure
+        if: failure()
+        run: cat /tmp/agent-service.log
+
+      - name: Stop the agent
+        if: always()
+        run: kill "$(cat /tmp/agent-service.pid)" 2>/dev/null || true
+
   # Single check to require in branch protection: it fails if any matrix leg failed.
   ci-status:
     name: CI status
     if: always()
-    needs: [build, docker, iac, monitoring, security]
+    needs: [build, docker, iac, monitoring, security, evals]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed
@@ -314,6 +367,7 @@ jobs:
           echo "iac result: ${{ needs.iac.result }}"
           echo "monitoring result: ${{ needs.monitoring.result }}"
           echo "security result: ${{ needs.security.result }}"
+          echo "evals result: ${{ needs.evals.result }}"
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "::error::One or more service builds did not succeed."
             exit 1
@@ -333,5 +387,9 @@ jobs:
           fi
           if [ "${{ needs.security.result }}" != "success" ]; then
             echo "::error::The RBAC or NetworkPolicy checks did not succeed."
+            exit 1
+          fi
+          if [ "${{ needs.evals.result }}" != "success" ]; then
+            echo "::error::The agent evaluation suite did not succeed."
             exit 1
           fi

@@ -1,0 +1,14 @@
+[
+  {"id":"compile-error","title":"Java compile error","log":"[ERROR] COMPILATION ERROR\n[ERROR] App.java:[42,13] cannot find symbol","root_cause":"The code did not compile.","action":"none"},
+  {"id":"test-failure","title":"Failing unit test","log":"[ERROR] There are test failures.\nAssertionError: expected 3 but was 2","root_cause":"The build failed because one or more tests failed","action":"none"},
+  {"id":"maven-dependency","title":"Maven dependency resolution","log":"[ERROR] Failed to collect dependencies\n[ERROR] Could not find artifact com.example:missing:jar:1.0","root_cause":"Maven could not download one of the project's dependencies.","action":"retry"},
+  {"id":"out-of-memory","title":"Out of memory","log":"java.lang.OutOfMemoryError: Java heap space\nProcess exited with code 137","root_cause":"The build was killed for using too much memory.","action":"none"},
+  {"id":"disk-full","title":"Runner disk full","log":"docker: failed to write layer: no space left on device","root_cause":"The build ran out of disk space on the runner.","action":"none"},
+  {"id":"docker-unavailable","title":"Docker daemon unavailable","log":"Cannot connect to the Docker daemon at unix:///var/run/docker.sock","root_cause":"The job tried to use Docker, but no Docker daemon was reachable from the runner.","action":"none"},
+  {"id":"registry-auth","title":"Registry authentication","log":"denied: requested access to the resource is denied\nunauthorized: authentication required","root_cause":"The job could not authenticate to the container registry.","action":"none"},
+  {"id":"network-dns","title":"Dependency host unavailable","log":"dial tcp: lookup registry.example on 10.0.0.2:53: no such host","root_cause":"The job could not reach a host or service it depends on.","action":"retry"},
+  {"id":"gitleaks-secret","title":"Secret scan failure","log":"gitleaks found 1 leak\npossible secret detected in application.yml","root_cause":"The secret-scanning step found a secret in the repository or the diff.","action":"none"},
+  {"id":"trivy-vulnerability","title":"Trivy vulnerability gate","log":"Trivy scan failed\nCRITICAL vulnerability has a fixed version","root_cause":"The image or dependency scan failed its severity gate.","action":"none"},
+  {"id":"kubernetes-rollout","title":"Kubernetes rollout failure","log":"deployment rollout not complete\ncontainerCreating pod is not ready","root_cause":"A Kubernetes step failed: a manifest was rejected, or a workload did not become ready.","action":"none"},
+  {"id":"unknown","title":"Unknown failure fallback","log":"The build stopped unexpectedly\nSee the attached artifact for more details","root_cause":"The job failed, but its log contains none of the signatures this agent knows.","action":"none"}
+]

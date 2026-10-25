@@ -34,7 +34,8 @@ spec:
       annotations:
         # Bump these when the matching ConfigMap changes so a rollout happens.
         checksum/datasources: "grafana-datasources-v1"
-        checksum/dashboards: "grafana-dashboards-v1"
+        # v2 adds the Phase 10 agent-overview dashboard.
+        checksum/dashboards: "grafana-dashboards-v2"
     spec:
       securityContext:
         runAsNonRoot: true

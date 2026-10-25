@@ -1,5 +1,12 @@
-# The Grafana dashboard, shipped as a ConfigMap so that "kubectl apply -R -f
-# monitoring/" provisions it with everything else.
+# The Grafana dashboards, shipped as one ConfigMap so that "kubectl apply -R -f
+# monitoring/" provisions all of them with everything else. The whole ConfigMap
+# is mounted at /var/lib/grafana/dashboards (see ../deployment.yaml) and the
+# provisioning file loads every .json it finds there, so a second dashboard is a
+# second key here rather than a second ConfigMap.
+#
+#   platform-overview.json - Phase 6: are the services up, and how are they doing
+#   agent-overview.json    - Phase 10: what did the agent do, how long did it
+#                            take, how many steps did it spend, what did it cost
 #
 # WHY THE JSON IS INSIDE THE CONFIGMAP rather than sitting next to it as a
 # .json file: a bare .json file in the repository would need a second command
@@ -11,6 +18,13 @@
 # Prometheus's own "up" and "ALERTS" series - see ../prometheus/configmap.yaml
 # and ../prometheus/rules/platform-alerts.yaml. Datasources are referenced by
 # the uids set in ../datasources.yaml.
+#
+# The agent's panels read the metrics recorded in
+# AgentTelemetry/AgentTelemetryAdvice (Micrometer names with dots arrive in
+# Prometheus with underscores and a "_total" suffix) and the Loki labels
+# Promtail attaches: namespace, pod, container, app. The agent is scraped by the
+# "agent-service" job in ../prometheus/configmap.yaml, which is why every panel
+# moves once the agent answers a request.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -191,6 +205,198 @@ data:
             {
               "refId": "A",
               "expr": "{namespace=\"devsecops\"}"
+            }
+          ],
+          "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+        }
+      ]
+    }
+  agent-overview.json: |
+    {
+      "uid": "agent-overview",
+      "title": "Agent overview",
+      "description": "What the DevSecOps agent did: which triggers it answered, what it concluded, how many steps it spent and what that is estimated to cost. Cost is an estimate derived from call counts and the configured rates (agent.tracing.cost-per-*-call-usd), not an invoice.",
+      "tags": ["devsecops", "phase10", "agent"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Agent scrape target",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+          "targets": [
+            {
+              "refId": "A",
+              "instant": true,
+              "legendFormat": "{{service}}",
+              "expr": "up{service=\"agent-service\"}"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value_and_name"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+              ]
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Low-confidence share (5m)",
+          "description": "The share of diagnoses the agent was less than 50% sure of. This is the one number that says whether its answers are worth reading - and it is invisible in a total.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+          "targets": [
+            {
+              "refId": "A",
+              "instant": true,
+              "expr": "sum(rate(agent_low_confidence_diagnoses_total[5m])) / clamp_min(sum(rate(agent_diagnoses_total[5m])), 0.000000001)"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "value"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "noValue": "0",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.25 },
+                  { "color": "red", "value": 0.5 }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Requests / sec by endpoint",
+          "description": "One counter per trigger: /alert, /analyze-ci, /analyze-security and /approve.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 6 },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{endpoint}}",
+              "expr": "sum by (endpoint) (rate(agent_requests_total[5m]))"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "p95 request latency by endpoint",
+          "description": "A diagnosis is bounded by its tool budget, so a rising p95 is usually a monitoring call that is timing out rather than a slow model.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{endpoint}}",
+              "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(agent_request_duration_seconds_bucket[5m])))"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Estimated cost, USD per hour",
+          "description": "rate() over a cost counter gives USD per second; times 3600 gives an hourly rate. It is an estimate from the configured rates, and a deployment on a local model reports zero because its rates are zero.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{endpoint}}",
+              "expr": "sum by (endpoint) (rate(agent_estimated_cost_usd_total[1h])) * 3600"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 3 }, "overrides": [] }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Diagnoses by recommended action",
+          "description": "What the agent wanted to do, split by the action the rule table or the model chose. A spike in restart or rollback is a spike in what a human is being asked to approve.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{action}}",
+              "expr": "sum by (action) (rate(agent_diagnoses_total[5m]))"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Tool calls by mode",
+          "description": "How many steps the agent spent, split by whether it was reading a real cluster or a fixture. A diagnosis that needs many more steps in live mode than in mock mode is worth a look.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "legendFormat": "{{mode}}",
+              "expr": "sum by (mode) (rate(agent_tool_calls_total[5m]))"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+        },
+        {
+          "id": 8,
+          "type": "logs",
+          "title": "Agent traces",
+          "description": "One structured line per request, written by the sink selected in agent.tracing.mode. Promtail ships it here, so this panel is the laptop's trace UI as well as the cluster's.",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{namespace=\"devsecops\", app=\"agent-service\"} |= \"agentservice.trace\""
+            }
+          ],
+          "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+        },
+        {
+          "id": 9,
+          "type": "logs",
+          "title": "Audit trail: tool calls, decisions and approvals",
+          "description": "The AUDIT logger's entries. Every tool call, every decision and every approval is here, with credential-shaped fields replaced by their names.",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{namespace=\"devsecops\", app=\"agent-service\"} |= \"AUDIT\""
             }
           ],
           "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
