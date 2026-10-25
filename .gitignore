@@ -80,7 +80,11 @@ kind-config.local.yaml
 # Logs / runtime artifacts
 # ---------------------------------------------------------------------------
 *.log
-logs/
+# Anchored to the repository root: an unanchored "logs/" also matched the Java
+# package directory services/agent-service/src/main/java/com/devsecops/
+# agentservice/logs/, which silently kept LogSanitizer.java and
+# PromptInjectionGuard.java out of git.
+/logs/
 loki-data/
 prometheus-data/
 grafana-data/
