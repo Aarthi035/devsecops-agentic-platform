@@ -107,6 +107,26 @@ data:
   # agent still proposes actions, and POST /approve refuses them with a 401.
   AGENT_APPROVAL_TTL_SECONDS: "900"
   AGENT_APPROVAL_MAX_RETAINED: "100"
+
+  # --- Phase 10: where a finished request is traced, and what it cost ------
+  #
+  # The cluster default is "log": one structured line per request to the
+  # 'com.devsecops.agentservice.trace' logger, which Promtail already ships to
+  # Loki. Set it to "langfuse" to export instead, and put AGENT_TRACING_PUBLIC_KEY
+  # / AGENT_TRACING_SECRET_KEY in the agent-credentials Secret below - with no
+  # keys the agent falls back to the log sink rather than failing. "off" silences
+  # the export entirely; the Micrometer metrics behind the Grafana agent panel
+  # are recorded in every mode.
+  #
+  # Cost is an estimate, not an invoice: a local Ollama call has none. A
+  # deployment on a local model can set both rates to "0" for an honest zero.
+  AGENT_TRACING_MODE: "log"
+  AGENT_TRACING_HOST: "http://langfuse.monitoring.svc.cluster.local:3000"
+  AGENT_TRACING_TIMEOUT_SECONDS: "5"
+  AGENT_TRACING_RELEASE: "devsecops-agentic-platform"
+  AGENT_TRACING_ENVIRONMENT: "cluster"
+  AGENT_TRACING_COST_PER_MODEL_CALL_USD: "0.0002"
+  AGENT_TRACING_COST_PER_TOOL_CALL_USD: "0.00002"
 ---
 # Created at deploy time, never committed - same rule as k8s/11-secret.yaml.
 #

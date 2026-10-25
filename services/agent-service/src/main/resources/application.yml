@@ -120,6 +120,39 @@ agent:
     # later is about a situation that has changed.
     default-ttl-seconds: ${AGENT_APPROVAL_TTL_SECONDS:900}
     max-retained: ${AGENT_APPROVAL_MAX_RETAINED:100}
+  # --- Phase 10: where a finished request is traced, and what it cost -------
+  #
+  # This is an export of work the agent has already done, so it is separate from
+  # every knob above and can be turned off without changing behaviour.
+  #
+  #   off      - nothing leaves the process. The Micrometer metrics are still
+  #              recorded, so the Grafana panel works on a deployment that
+  #              traces nothing.
+  #   log      - one structured line per request to the
+  #              'com.devsecops.agentservice.trace' logger. Promtail ships it to
+  #              Loki, so this is queryable on a laptop with nothing else
+  #              installed - which is why it, and not langfuse, is the default.
+  #   langfuse - the same trace POSTed to a Langfuse instance. With no keys
+  #              configured it falls back to the log sink and says so once.
+  tracing:
+    mode: ${AGENT_TRACING_MODE:log}
+    host: ${AGENT_TRACING_HOST:http://langfuse.monitoring.svc.cluster.local:3000}
+    # Set from a Secret in the cluster. They never appear in a log line, a
+    # metric or a trace.
+    public-key: ${AGENT_TRACING_PUBLIC_KEY:}
+    secret-key: ${AGENT_TRACING_SECRET_KEY:}
+    timeout-seconds: ${AGENT_TRACING_TIMEOUT_SECONDS:5}
+    # Tags every trace, so a demo run and a production run are distinguishable
+    # in one Langfuse project.
+    release: ${AGENT_TRACING_RELEASE:devsecops-agentic-platform}
+    environment: ${AGENT_TRACING_ENVIRONMENT:local}
+    # Cost is the one evaluation dimension the agent cannot read off its own
+    # response: a local Ollama call has no invoice. It is therefore estimated
+    # from a call count and these two rates. Both are labelled as an estimate
+    # wherever shown, and a deployment on a local model can set them to zero for
+    # an honest zero instead of a made-up number.
+    cost-per-model-call-usd: ${AGENT_TRACING_COST_PER_MODEL_CALL_USD:0.0002}
+    cost-per-tool-call-usd: ${AGENT_TRACING_COST_PER_TOOL_CALL_USD:0.00002}
 
 # Actuator: /actuator/health (+ liveness/readiness probes), /actuator/metrics, /actuator/prometheus
 management:

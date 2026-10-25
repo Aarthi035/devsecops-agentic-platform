@@ -83,12 +83,16 @@ kind-config.local.yaml
 # Anchored to the repository root: an unanchored "logs/" also matched the Java
 # package directory services/agent-service/src/main/java/com/devsecops/
 # agentservice/logs/, which silently kept LogSanitizer.java and
-# PromptInjectionGuard.java out of git.
+# PromptInjectionGuard.java out of git. The same rule had also hidden that
+# package's tests; both are tracked now.
 /logs/
 loki-data/
 prometheus-data/
 grafana-data/
 app-data/
+
+**/__pycache__/
+*.pyc
 
 # ---------------------------------------------------------------------------
 # Build / scan reports
