@@ -54,6 +54,15 @@ public class AuditLog {
     /** Event name for a conclusion the agent reached. */
     public static final String DECISION = "agent.decision";
 
+    /** A state-changing action the agent suggested and is waiting for a human to authorise. */
+    public static final String ACTION_PROPOSED = "agent.action_proposed";
+
+    /** A human's answer to a proposal, including the refusals. */
+    public static final String ACTION_DECIDED = "agent.action_decided";
+
+    /** The result of running an approved action, whether it worked or not. */
+    public static final String ACTION_EXECUTED = "agent.action_executed";
+
     private final ObjectMapper objectMapper;
 
     public AuditLog(ObjectMapper objectMapper) {

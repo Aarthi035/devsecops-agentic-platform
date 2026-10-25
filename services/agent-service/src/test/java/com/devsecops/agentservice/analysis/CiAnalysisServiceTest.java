@@ -10,11 +10,13 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.devsecops.agentservice.TestProperties;
 import com.devsecops.agentservice.audit.AuditLog;
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.diagnosis.Diagnosis;
 import com.devsecops.agentservice.diagnosis.DiagnosisEngine;
 import com.devsecops.agentservice.diagnosis.DiagnosisRequest;
+import com.devsecops.agentservice.diagnosis.EvidenceBundle;
 import com.devsecops.agentservice.error.AgentUpstreamException;
 import com.devsecops.agentservice.github.GithubClient;
 import com.devsecops.agentservice.github.GithubDtos;
@@ -255,13 +257,25 @@ class CiAnalysisServiceTest {
         return new AgentProperties(
                 new AgentProperties.Llm("heuristic", "http://localhost:11434", "llama3.2:3b", 60, 700, 0.1),
                 new AgentProperties.Github("https://api.github.com", token, commentEnabled),
-                new AgentProperties.Limits(maxLogChars, maxJobs, 30));
+                new AgentProperties.Limits(maxLogChars, maxJobs, 30, 12),
+                TestProperties.mockTools(),
+                TestProperties.incident(),
+                TestProperties.security(),
+                TestProperties.approval());
     }
 
-    /** A stand-in for the engine: deterministic, and it remembers what it was asked. */
+    /**
+     * A stand-in for the engine: deterministic, and it remembers what it was asked.
+     *
+     * <p>{@code diagnoseEvidence} is implemented rather than stubbed with
+     * {@code null} because the interface requires it of every engine - the CI
+     * pipeline in this test never calls it, and a stub that silently returned
+     * nothing would hide a future caller reaching it by mistake.
+     */
     private static final class StubEngine implements DiagnosisEngine {
 
         private final AtomicReference<DiagnosisRequest> lastRequest = new AtomicReference<>();
+        private final AtomicReference<EvidenceBundle> lastBundle = new AtomicReference<>();
 
         @Override
         public Diagnosis diagnose(DiagnosisRequest request) {
@@ -272,6 +286,17 @@ class CiAnalysisServiceTest {
                     "Fix the reported compilation error.",
                     "none",
                     0.85);
+        }
+
+        @Override
+        public Diagnosis diagnoseEvidence(EvidenceBundle bundle) {
+            lastBundle.set(bundle);
+            return new Diagnosis(
+                    "Stub diagnosis from evidence.",
+                    bundle.evidence(),
+                    "Stub fix.",
+                    "none",
+                    0.5);
         }
 
         @Override

@@ -3,6 +3,7 @@ package com.devsecops.agentservice.diagnosis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.devsecops.agentservice.TestProperties;
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -49,10 +50,10 @@ class OllamaDiagnosisEngineTest {
         server.start();
 
         String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
-        AgentProperties properties = new AgentProperties(
+        AgentProperties properties = TestProperties.with(
                 new AgentProperties.Llm("ollama", baseUrl, "llama3.2:3b", 5, 700, 0.1),
                 new AgentProperties.Github("https://api.github.com", "", false),
-                new AgentProperties.Limits(12_000, 3, 5));
+                new AgentProperties.Limits(12_000, 3, 5, 12));
         engine = new OllamaDiagnosisEngine(properties, new ObjectMapper());
     }
 
@@ -127,10 +128,10 @@ class OllamaDiagnosisEngineTest {
     void reportsAnUnreachableEndpointAsAnUpstreamProblem() {
         // Point the engine at a port nothing is listening on: a stopped Ollama
         // must surface as "cannot reach the model", not as a 500.
-        AgentProperties unreachable = new AgentProperties(
+        AgentProperties unreachable = TestProperties.with(
                 new AgentProperties.Llm("ollama", "http://127.0.0.1:1", "llama3.2:3b", 2, 700, 0.1),
                 new AgentProperties.Github("https://api.github.com", "", false),
-                new AgentProperties.Limits(12_000, 3, 2));
+                new AgentProperties.Limits(12_000, 3, 2, 12));
 
         assertThatThrownBy(() -> new OllamaDiagnosisEngine(unreachable, new ObjectMapper()).diagnose(request()))
                 .isInstanceOf(AgentUpstreamException.class)

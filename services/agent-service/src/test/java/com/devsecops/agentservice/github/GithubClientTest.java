@@ -3,6 +3,7 @@ package com.devsecops.agentservice.github;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.devsecops.agentservice.TestProperties;
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -208,6 +209,10 @@ class GithubClientTest {
         return new AgentProperties(
                 new AgentProperties.Llm("heuristic", baseUrl, "llama3.2:3b", 5, 700, 0.1),
                 new AgentProperties.Github(baseUrl, token, true),
-                new AgentProperties.Limits(12_000, 3, 5));
+                new AgentProperties.Limits(12_000, 3, 5, 12),
+                TestProperties.mockTools(),
+                TestProperties.incident(),
+                TestProperties.security(),
+                TestProperties.approval());
     }
 }

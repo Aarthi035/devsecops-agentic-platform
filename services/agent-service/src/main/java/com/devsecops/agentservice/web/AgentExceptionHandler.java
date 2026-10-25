@@ -1,5 +1,7 @@
 package com.devsecops.agentservice.web;
 
+import com.devsecops.agentservice.error.AgentRequestException;
+import com.devsecops.agentservice.error.AgentUnauthorizedException;
 import com.devsecops.agentservice.error.AgentUpstreamException;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,7 +25,10 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  *       the agent did not. A caller (an alert, a pipeline) can retry or page on
  *       this, and it is never the agent's own bug.</li>
  *   <li>Validation and unreadable bodies → <b>400</b>, with the offending fields
- *       named so a caller can fix the request without reading the source.</li>
+ *       named so a caller can fix the request without reading the source.
+ *       {@link AgentRequestException} joins them: a request that is well-formed
+ *       JSON but wrong in substance - an empty alert group, an approval for an
+ *       expired action - is still the caller's to fix.</li>
  * </ul>
  *
  * <p>Everything else is left to Spring, which is the correct default: an
@@ -45,6 +50,28 @@ public class AgentExceptionHandler {
         body.put("error", "upstream_error");
         body.put("message", describe(exception));
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(body);
+    }
+
+    @ExceptionHandler(AgentUnauthorizedException.class)
+    public ResponseEntity<Map<String, Object>> handleUnauthorized(AgentUnauthorizedException exception) {
+        // Warn, not info: a refused approval is the one event here worth seeing
+        // in a log without turning on debug.
+        log.warn("Refused an approval: {}", exception.getMessage());
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", "unauthorized");
+        body.put("message", describe(exception));
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body);
+    }
+
+    @ExceptionHandler(AgentRequestException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(AgentRequestException exception) {
+        log.info("Rejected a request: {}", exception.getMessage());
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", "invalid_request");
+        body.put("message", describe(exception));
+        return ResponseEntity.badRequest().body(body);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

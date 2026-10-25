@@ -45,6 +45,81 @@ agent:
     # "max steps" guardrail applied to log fetching.
     max-failed-jobs: ${AGENT_MAX_FAILED_JOBS:3}
     github-timeout-seconds: ${AGENT_GITHUB_TIMEOUT_SECONDS:30}
+    # The same "max steps" guardrail applied to a Phase 9 investigation, where a
+    # step is a tool call. Shared by every alert in one notification, not
+    # granted per alert, so a large alert group cannot multiply it.
+    max-tool-calls: ${AGENT_MAX_TOOL_CALLS:12}
+  # --- Phase 9: the read-only tools ---------------------------------------
+  #
+  # mode=live talks to the real Prometheus, Loki and API server.
+  # mode=mock answers from fixtures in MockDiagnosticTools and contacts nothing,
+  # which is what the tests, the evaluation suite and the laptop demo run in.
+  #
+  # This one switch governs BOTH the read-only tools and the action executor:
+  # in mock mode the agent can neither read a cluster nor change one. That is
+  # deliberate - "which mode am I in?" has one answer rather than two.
+  tools:
+    mode: ${AGENT_TOOLS_MODE:live}
+    # Prometheus serves under /prometheus (its --web.external-url in the
+    # monitoring stack), so the prefix is part of the base URL.
+    prometheus-url: ${AGENT_PROMETHEUS_URL:http://prometheus.monitoring.svc.cluster.local:9090/prometheus}
+    prometheus-token: ${AGENT_PROMETHEUS_TOKEN:}
+    loki-url: ${AGENT_LOKI_URL:http://loki.monitoring.svc.cluster.local:3100}
+    kubernetes-url: ${AGENT_KUBERNETES_URL:https://kubernetes.default.svc}
+    # The diagnostic credential: the pod's own ServiceAccount token by default.
+    # The Role bound to that ServiceAccount grants get/list/watch and nothing
+    # else, so the read-only guarantee holds even if this code has a bug.
+    kubernetes-token: ${AGENT_KUBERNETES_TOKEN:}
+    kubernetes-token-file: ${AGENT_KUBERNETES_TOKEN_FILE:/var/run/secrets/kubernetes.io/serviceaccount/token}
+    kubernetes-ca-file: ${AGENT_KUBERNETES_CA_FILE:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
+    # The executor credential - used only by KubernetesActionExecutor, only
+    # after a human approval. Blank means "this deployment cannot change
+    # anything", which is why it defaults to empty rather than to the mounted
+    # ServiceAccount token: an agent that only diagnoses must not be able to act
+    # just because a token happened to be there.
+    executor-token: ${AGENT_EXECUTOR_TOKEN:}
+    executor-token-file: ${AGENT_EXECUTOR_TOKEN_FILE:}
+    timeout-seconds: ${AGENT_TOOLS_TIMEOUT_SECONDS:10}
+    # A monitoring stack coming up is worth retrying a GET for. The action
+    # executor deliberately does NOT retry: see KubernetesActionExecutor.
+    retries: ${AGENT_TOOLS_RETRIES:1}
+    max-samples: ${AGENT_TOOLS_MAX_SAMPLES:20}
+    max-log-lines: ${AGENT_TOOLS_MAX_LOG_LINES:200}
+    # Which fixture MockDiagnosticTools answers with. Ignored in live mode.
+    mock-scenario: ${AGENT_TOOLS_MOCK_SCENARIO:pod-restarts}
+  # --- Phase 9: what bounds one alert investigation ------------------------
+  incident:
+    # Alertmanager repeats a notification it has not had acknowledged. A repeat
+    # inside this window is the same incident and is not investigated twice.
+    dedup-window-seconds: ${AGENT_INCIDENT_DEDUP_WINDOW_SECONDS:300}
+    max-alerts: ${AGENT_INCIDENT_MAX_ALERTS:20}
+    # How far back the log and metric queries for an alert reach.
+    lookback-seconds: ${AGENT_INCIDENT_LOOKBACK_SECONDS:300}
+    # The namespace used when an alert carries no namespace label.
+    namespace: ${AGENT_INCIDENT_NAMESPACE:devsecops}
+  # --- Phase 9: where scanner reports are read from -----------------------
+  #
+  # report-directory is a boundary, not a default. A requested path is resolved
+  # inside it and refused if it escapes (including through a symlink), so
+  # POST /analyze-security cannot read an arbitrary file. max-report-bytes is
+  # checked before the file is read, so an oversized report costs a stat rather
+  # than a heap.
+  security:
+    report-path: ${AGENT_SECURITY_REPORT_PATH:/reports/trivy.json}
+    report-directory: ${AGENT_SECURITY_REPORT_DIRECTORY:/reports}
+    max-findings: ${AGENT_SECURITY_MAX_FINDINGS:50}
+    max-report-bytes: ${AGENT_SECURITY_MAX_REPORT_BYTES:2097152}
+  # --- Phase 9: who may authorise a state change --------------------------
+  #
+  # A blank token means approvals are refused, not permitted: an agent that can
+  # restart workloads without a credential would be a cluster-admin endpoint
+  # wearing a diagnosis. The k8s ConfigMap sets this from a Secret.
+  approval:
+    token: ${AGENT_APPROVAL_TOKEN:}
+    # How long a proposal waits for a human. A proposal still pending an hour
+    # later is about a situation that has changed.
+    default-ttl-seconds: ${AGENT_APPROVAL_TTL_SECONDS:900}
+    max-retained: ${AGENT_APPROVAL_MAX_RETAINED:100}
 
 # Actuator: /actuator/health (+ liveness/readiness probes), /actuator/metrics, /actuator/prometheus
 management:
