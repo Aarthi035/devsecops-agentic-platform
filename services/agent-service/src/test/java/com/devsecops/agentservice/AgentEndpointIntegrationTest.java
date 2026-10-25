@@ -13,11 +13,11 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.client.RestTestClient;
 
 /**
  * The whole Phase 8 path over a real socket: an HTTP request in, a diagnosis
@@ -29,12 +29,13 @@ import org.springframework.http.ResponseEntity;
  * this one tests the assembly.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureRestTestClient
 class AgentEndpointIntegrationTest {
 
     @Autowired
-    private TestRestTemplate restTemplate;
+    private RestTestClient restTestClient;
 
-    @MockBean
+    @MockitoBean
     private GithubClient githubClient;
 
     @Test
@@ -50,13 +51,16 @@ class AgentEndpointIntegrationTest {
         when(githubClient.fetchJobLog(eq("example/platform"), anyLong())).thenReturn(
                 "[ERROR] Compilation failure\n[ERROR] App.java:[42,13] cannot find symbol");
 
-        ResponseEntity<Map> response = restTemplate.postForEntity(
-                "/analyze-ci",
-                Map.of("repository", "example/platform", "runId", 1234),
-                Map.class);
+        Map<String, Object> body = restTestClient.post()
+                .uri("/analyze-ci")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("repository", "example/platform", "runId", 1234))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Map.class)
+                .returnResult()
+                .getResponseBody();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        Map<String, Object> body = response.getBody();
         assertThat(body).isNotNull();
         assertThat(body.get("provider")).isEqualTo("heuristic");
         assertThat(body.get("workflowName")).isEqualTo("CI");
@@ -78,19 +82,30 @@ class AgentEndpointIntegrationTest {
 
     @Test
     void rejectsAnInvalidRequestBeforeCallingGithub() {
-        ResponseEntity<Map> response = restTemplate.postForEntity(
-                "/analyze-ci", Map.of("repository", "not-a-repo", "runId", 1), Map.class);
+        Map<String, Object> body = restTestClient.post()
+                .uri("/analyze-ci")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("repository", "not-a-repo", "runId", 1))
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody(Map.class)
+                .returnResult()
+                .getResponseBody();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).containsEntry("error", "invalid_request");
+        assertThat(body).containsEntry("error", "invalid_request");
     }
 
     @Test
     void exposesItsHealthToTheOrchestrator() {
-        ResponseEntity<Map> response = restTemplate.getForEntity("/actuator/health", Map.class);
+        Map<String, Object> body = restTestClient.get()
+                .uri("/actuator/health")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Map.class)
+                .returnResult()
+                .getResponseBody();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).containsEntry("status", "UP");
+        assertThat(body).containsEntry("status", "UP");
     }
 
     /** Untyped JSON arrays deserialise to {@code List<Object>}; this keeps the assertion readable. */

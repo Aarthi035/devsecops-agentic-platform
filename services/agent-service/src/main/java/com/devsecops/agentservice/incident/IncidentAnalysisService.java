@@ -10,8 +10,9 @@ import com.devsecops.agentservice.diagnosis.DiagnosisEngine;
 import com.devsecops.agentservice.logs.LogSanitizer;
 import com.devsecops.agentservice.tools.DiagnosticTools;
 import com.devsecops.agentservice.tools.ToolResult;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -430,7 +431,7 @@ public class IncidentAnalysisService {
         try {
             JsonNode replicas = objectMapper.readTree(body).path("spec").path("replicas");
             return replicas.isNumber() ? Optional.of(replicas.asInt()) : Optional.empty();
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JacksonException e) {
             // The read succeeded but was not JSON, which is worth knowing and
             // not worth failing an alert over.
             log.warn("Could not read a replica count from the API's answer: {}", e.getOriginalMessage());

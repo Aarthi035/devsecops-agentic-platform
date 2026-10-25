@@ -12,7 +12,7 @@ import com.devsecops.agentservice.logs.LogSanitizer;
 import com.devsecops.agentservice.logs.PromptInjectionGuard;
 import com.devsecops.agentservice.tools.DiagnosticTools;
 import com.devsecops.agentservice.tools.ToolResult;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;

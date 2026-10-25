@@ -8,7 +8,7 @@ import com.devsecops.agentservice.error.AgentUnauthorizedException;
 import com.devsecops.agentservice.tools.DiagnosticTools;
 import com.devsecops.agentservice.tools.MockDiagnosticTools;
 import com.devsecops.agentservice.tools.ToolResult;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;

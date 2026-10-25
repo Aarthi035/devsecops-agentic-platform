@@ -21,7 +21,7 @@ import com.devsecops.agentservice.error.AgentUpstreamException;
 import com.devsecops.agentservice.github.GithubClient;
 import com.devsecops.agentservice.github.GithubDtos;
 import com.devsecops.agentservice.logs.LogSanitizer;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;

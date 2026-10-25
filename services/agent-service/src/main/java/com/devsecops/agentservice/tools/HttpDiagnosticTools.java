@@ -2,8 +2,9 @@ package com.devsecops.agentservice.tools;
 
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -127,7 +128,7 @@ public class HttpDiagnosticTools implements DiagnosticTools {
         } catch (AgentUpstreamException e) {
             return ToolResult.failed("queryPrometheus",
                     "Prometheus did not answer '" + promql + "': " + e.getMessage(), e.getMessage());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             return ToolResult.failed("queryPrometheus",
                     "Prometheus returned something that is not JSON for '" + promql + "'.",
                     e.getMessage());
@@ -140,7 +141,7 @@ public class HttpDiagnosticTools implements DiagnosticTools {
         JsonNode metric = entry.path("metric");
         if (metric.isObject() && !metric.isEmpty()) {
             List<String> labels = new ArrayList<>();
-            Iterator<Map.Entry<String, JsonNode>> fields = metric.fields();
+            Iterator<Map.Entry<String, JsonNode>> fields = metric.properties().iterator();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
                 labels.add(field.getKey() + "=\"" + field.getValue().asText() + "\"");
@@ -192,7 +193,7 @@ public class HttpDiagnosticTools implements DiagnosticTools {
             return ToolResult.ok("queryLoki", summary, truncate(String.join("\n", lines)));
         } catch (AgentUpstreamException e) {
             return ToolResult.failed("queryLoki", "Loki did not answer: " + e.getMessage(), e.getMessage());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             return ToolResult.failed("queryLoki", "Loki returned something that is not JSON.", e.getMessage());
         }
     }
@@ -214,7 +215,7 @@ public class HttpDiagnosticTools implements DiagnosticTools {
                     truncate(response.body()));
         } catch (AgentUpstreamException e) {
             return ToolResult.failed(tool, "Could not read " + where + ": " + e.getMessage(), e.getMessage());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             return ToolResult.failed(tool, "Kubernetes returned something that is not JSON for " + where + ".",
                     e.getMessage());
         }
@@ -326,7 +327,7 @@ public class HttpDiagnosticTools implements DiagnosticTools {
         } catch (AgentUpstreamException e) {
             return ToolResult.failed(tool, "Could not read events for " + where + ": " + e.getMessage(),
                     e.getMessage());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             return ToolResult.failed(tool, "Kubernetes returned something that is not JSON for the events of "
                     + where + ".", e.getMessage());
         }

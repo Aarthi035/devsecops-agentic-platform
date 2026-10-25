@@ -6,8 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.devsecops.agentservice.TestProperties;
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -150,7 +150,7 @@ class OllamaDiagnosisEngineTest {
         body.put("message", Map.of("role", "assistant", "content", content));
         try {
             return MAPPER.writeValueAsString(body);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalStateException(e);
         }
     }

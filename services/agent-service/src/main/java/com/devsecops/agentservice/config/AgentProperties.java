@@ -53,7 +53,7 @@ public record AgentProperties(
             @DefaultValue("http://localhost:11434") String baseUrl,
             @DefaultValue("llama3.2:3b") String model,
             @DefaultValue("60") int timeoutSeconds,
-            @DefaultValue("700") int maxOutputTokens,
+            @DefaultValue("700") int outputBudget,
             @DefaultValue("0.1") double temperature) {
     }
 

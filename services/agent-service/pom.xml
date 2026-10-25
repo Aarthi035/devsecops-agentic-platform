@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.5</version>
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
@@ -20,6 +20,10 @@
     <properties>
         <java.version>17</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Pinned ahead of the Spring Boot BOM. 4.1.1 manages Tomcat
+             11.0.24, and the "Image" job in .github/workflows/security.yml
+             fails on the HIGH Tomcat CVEs that 11.0.25 fixes. -->
+        <tomcat.version>11.0.26</tomcat.version>
         <!-- Phase 7. Empty means "no key": the "Dependencies" job in
              .github/workflows/security.yml passes the real one in with
              -Dnvd.api.key when the repository secret exists, so a local run
@@ -58,9 +62,16 @@
             is stateless: Phase 8 keeps its run history in the log, not in a
             database.
         -->
+        <!--
+            Spring Boot 4 split the web test support out of
+            spring-boot-starter-test: @AutoConfigureMockMvc and @WebMvcTest now
+            live in spring-boot-webmvc-test, and TestRestTemplate in
+            spring-boot-resttestclient. This starter aggregates all three, so
+            the tests below compile without another dependency.
+        -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -74,6 +85,20 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                        Mockito 5's inline mock maker has to be loaded as a JVM
+                        agent. Without this it falls back to self-attaching at
+                        runtime, which fails wherever the JVM will not let a
+                        process attach to itself ("Could not self-attach to
+                        current VM using external process"), and the failure
+                        looks like every @Mock test erroring at once rather
+                        than like a configuration problem. mockito-core ships
+                        Premain-Class: org.mockito.internal.PremainAttach
+                        precisely so it can be used here.
+                    -->
+                    <argLine>-javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</argLine>
+                </configuration>
             </plugin>
             <!--
                 Phase 7. Declared but not bound to a lifecycle phase, so

@@ -2,8 +2,9 @@ package com.devsecops.agentservice.github;
 
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -165,7 +166,7 @@ public class GithubClient {
         String payload;
         try {
             payload = objectMapper.writeValueAsString(Map.of("body", body));
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             throw new IllegalStateException("Could not serialise the comment body.", e);
         }
 
@@ -177,7 +178,7 @@ public class GithubClient {
         }
         try {
             return objectMapper.readTree(response.body()).path("html_url").asText(null);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             // The comment was posted; only reading its URL back failed, which is
             // not worth failing the whole analysis over.
             log.warn("Comment on {}#{} was posted but its URL could not be read back.", repository, pullNumber);
@@ -213,7 +214,7 @@ public class GithubClient {
         }
         try {
             return objectMapper.readTree(response.body());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             throw new AgentUpstreamException("GitHub returned something that is not JSON for " + path + ".", e);
         }
     }

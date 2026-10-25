@@ -1,7 +1,7 @@
 package com.devsecops.agentservice.tracing;
 
 import com.devsecops.agentservice.config.TracingProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -138,7 +138,7 @@ public class LangfuseTracePublisher implements AgentTracePublisher {
 
         try {
             return mapper.writeValueAsString(Map.of("batch", List.of(event)));
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (tools.jackson.core.JacksonException e) {
             throw new IllegalStateException("trace " + trace.id() + " could not be serialised", e);
         }
     }

@@ -1,7 +1,7 @@
 package com.devsecops.agentservice.audit;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -89,7 +89,7 @@ public class AuditLog {
 
         try {
             AUDIT.info(objectMapper.writeValueAsString(entry));
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             // Fall back to a line that is still searchable by event, rather than
             // losing the record or failing the request that produced it.
             AUDIT.info("{\"event\":\"" + event + "\",\"note\":\"audit fields could not be serialised\"}");

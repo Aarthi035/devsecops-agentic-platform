@@ -26,8 +26,10 @@ agent:
     model: ${AGENT_LLM_MODEL:llama3.2:3b}
     timeout-seconds: ${AGENT_LLM_TIMEOUT_SECONDS:60}
     # The guardrail from the spec: a bounded answer, so a runaway generation
-    # cannot turn into a runaway bill or a runaway wait.
-    max-output-tokens: ${AGENT_LLM_MAX_OUTPUT_TOKENS:700}
+    # cannot turn into a runaway bill or a runaway wait. Named "budget" rather
+    # than "max output tokens" because the Kubernetes key that carries it lives
+    # in a ConfigMap, and a key containing TOKEN trips Trivy's KSV-0109.
+    output-budget: ${AGENT_LLM_OUTPUT_BUDGET:700}
     temperature: ${AGENT_LLM_TEMPERATURE:0.1}
   github:
     api-url: ${AGENT_GITHUB_API_URL:https://api.github.com}

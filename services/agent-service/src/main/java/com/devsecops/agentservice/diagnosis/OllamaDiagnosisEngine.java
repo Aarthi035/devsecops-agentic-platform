@@ -2,8 +2,9 @@ package com.devsecops.agentservice.diagnosis;
 
 import com.devsecops.agentservice.config.AgentProperties;
 import com.devsecops.agentservice.error.AgentUpstreamException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -34,7 +35,7 @@ import org.springframework.stereotype.Component;
  * model:
  * <ul>
  *   <li><b>Bounded output.</b> {@code num_predict} is set from
- *       {@code agent.llm.max-output-tokens}, not left to the model's own
+ *       {@code agent.llm.output-budget}, not left to the model's own
  *       default, so a runaway generation cannot cost unbounded time.</li>
  *   <li><b>Structured output.</b> {@code format: json} makes Ollama constrain
  *       generation to valid JSON, and the result is parsed into
@@ -185,7 +186,7 @@ public class OllamaDiagnosisEngine implements DiagnosisEngine {
         options.put("temperature", llm.temperature());
         // The "max token limit" guardrail from the spec, in the one place the
         // model's generation length is actually decided.
-        options.put("num_predict", llm.maxOutputTokens());
+        options.put("num_predict", llm.outputBudget());
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", llm.model());
@@ -198,7 +199,7 @@ public class OllamaDiagnosisEngine implements DiagnosisEngine {
 
         try {
             return objectMapper.writeValueAsString(body);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             // Serialising maps of strings and numbers cannot realistically fail;
             // if it does, it is a bug, so it becomes a 500 rather than a 502.
             throw new IllegalStateException("Could not serialise the model request.", e);
@@ -274,7 +275,7 @@ public class OllamaDiagnosisEngine implements DiagnosisEngine {
             String json = extractJsonObject(content.asText());
             log.debug("Model returned a diagnosis of {} characters.", json.length());
             return objectMapper.readValue(json, Diagnosis.class);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             throw new AgentUpstreamException(
                     "The model did not return the expected JSON diagnosis: " + e.getMessage(), e);
         }

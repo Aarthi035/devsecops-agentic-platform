@@ -1,7 +1,7 @@
 package com.devsecops.agentservice.action;
 
 import com.devsecops.agentservice.TestProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;

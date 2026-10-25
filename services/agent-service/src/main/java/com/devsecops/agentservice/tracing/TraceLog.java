@@ -1,7 +1,7 @@
 package com.devsecops.agentservice.tracing;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,7 +36,7 @@ final class TraceLog {
     static void write(ObjectMapper mapper, AgentTrace trace, String sink) {
         try {
             log.info(mapper.writeValueAsString(new Envelope(sink, trace)));
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             log.warn("Could not serialise a trace for sink '{}': {}", sink, e.getMessage());
         }
     }
