@@ -71,12 +71,13 @@ WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 # a literal value in the repository - it belongs in a Secret. Phase 7's
 # gitleaks scan is the other half of this.
 #
-# The exception is the plural "tokenS", which is a *count* rather than a
-# credential: AGENT_LLM_MAX_OUTPUT_TOKENS ("700") bounds how much a model may
-# generate. Matching the singular and leaving the plural alone keeps the rule
-# about credentials instead of about spelling, and nothing is lost at the value
-# level - gitleaks still scans the literal text of every one of these files.
-SECRET_ISH_KEY = re.compile(r"PASSWORD|SECRET|CREDENTIAL|API_KEY|TOKEN(?!S)", re.IGNORECASE)
+# TOKEN is matched whole. It used to be TOKEN(?!S) so that
+# AGENT_LLM_MAX_OUTPUT_TOKENS - a generation limit, not a credential - could
+# stay a ConfigMap key; that key was renamed to AGENT_LLM_OUTPUT_BUDGET
+# (Trivy's KSV-0109 flagged it, and neither an inline #trivy:ignore comment nor
+# a .trivyignore.yaml entry suppresses KSV-0109), so the exception is gone and
+# the rule is about credentials again.
+SECRET_ISH_KEY = re.compile(r"PASSWORD|SECRET|CREDENTIAL|API_KEY|TOKEN", re.IGNORECASE)
 
 PROTOCOLS = {"TCP", "UDP", "SCTP"}
 

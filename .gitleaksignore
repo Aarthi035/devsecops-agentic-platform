@@ -1,0 +1,15 @@
+# gitleaks fingerprints that are known false positives.
+#
+# One line per finding, in the format gitleaks itself prints:
+#
+#     <commit>:<file>:<rule-id>:<line>
+#
+# The entry below is the token-shaped literal the Phase 8-9 test suite used to
+# prove LogSanitizer redacts GitHub tokens. Commit 24fa86b replaced every such
+# fixture in the working tree with an obvious placeholder, but a history scan
+# reads the commits, not the tree, and a history scan is the whole point of the
+# "Secrets" job: "we deleted it" and "it was never there" are different claims.
+#
+# The value is allow-listed by fingerprint rather than by file or by rule, so
+# the rule stays armed for the rest of that file and for every future commit.
+fd9ab743b791ef4ca0f2158f39c0c59daf3d67fe:services/agent-service/src/main/java/com/devsecops/agentservice/tools/MockDiagnosticTools.java:github-pat:205

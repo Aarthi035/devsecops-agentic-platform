@@ -870,15 +870,19 @@ The cluster-free half of the phase is a linter over the manifests, in the same s
 | `allow-ingress-from-ingress-controller` | the platform Pods | ← `ingress-nginx`, ports 8081/8082/8083 |
 | `allow-metrics-scrape-from-monitoring` | the platform Pods | ← `monitoring`, ports 8081/8082/8083 |
 | `allow-order-service-to-call-others` | `order-service` | → `user-service:8081`, → `product-service:8082` |
+| `allow-order-service-into-user-service` | `user-service` | ← `order-service`, port 8081 |
+| `allow-order-service-into-product-service` | `product-service` | ← `order-service`, port 8082 |
 
-The alternative — leave the namespace open and block known-bad traffic — cannot work, because the interesting traffic is the traffic you did not think of. Return traffic is not listed anywhere: NetworkPolicy is stateful, so a reply on an allowed connection is allowed by default. The ports are **container** ports, not Service ports, because the policy applies to packets hitting the Pod, after the Service has done its port mapping. `kubernetes.io/metadata.name` identifies a namespace without anyone having to label it by hand (the API server has set it on every Namespace since 1.21).
+The alternative — leave the namespace open and block known-bad traffic — cannot work, because the interesting traffic is the traffic you did not think of. Return traffic is not listed anywhere: NetworkPolicy is stateful, so a reply on an allowed connection is allowed by default. Stateful is not the same as two-way, though — a *reply* is free, the next *connection* is not, which is why the `order-service` conversation needs a rule on the egress side and a matching one on the ingress side. The ports are **container** ports, not Service ports, because the policy applies to packets hitting the Pod, after the Service has done its port mapping. `kubernetes.io/metadata.name` identifies a namespace without anyone having to label it by hand (the API server has set it on every Namespace since 1.21).
 
-**The caveat that matters:** kind's default CNI, `kindnetd`, accepts these objects but does not enforce them. They are real and correct, and they take effect the moment the cluster in front of them runs a policy-capable CNI (Calico, Cilium, kube-router) — on the stock laptop cluster they are inert. So "the policies are applied" is not the same claim as "the policies are enforced", and Phase 7 only makes the first one. To find out which one you have:
+**The caveat that matters:** a NetworkPolicy is only a description, and the CNI is what enforces it. kind's default CNI, `kindnetd`, **has enforced policy since kind v0.24.0** — where it delegates to [`sigs.k8s.io/kube-network-policies`](https://github.com/kubernetes-sigs/kube-network-policies) — and [`cd.yml`](.github/workflows/cd.yml) pins `KIND_VERSION: v0.33.0`, so the rules above are load-bearing in CI rather than decoration. That cuts both ways, because a rule that is merely *plausible* is not good enough: the CD smoke test reaches `/api/orders` only if the traffic is allowed on **both** hops. To find out which one you have:
 
 ```bash
 # 1. Which CNI put the Pods on the network?
 kubectl -n kube-system get pods -o name | grep -E 'calico|cilium|kube-router|kindnet'
-#    kindnet -> accepted, not enforced.  Calico/Cilium/kube-router -> enforced.
+#    kindnet -> enforced on kind v0.24.0+ (this repo pins v0.33.0).
+#    Calico/Cilium/kube-router -> enforced. A kindnet older than v0.24.0 ->
+#    accepted, not enforced.
 
 # 2. Prove it with traffic rather than with the CNI's name. default-deny-all
 #    has no rule allowing this Pod at all, so the call must fail:
@@ -886,7 +890,8 @@ kubectl -n devsecops run probe --rm -it --restart=Never \
   --image=curlimages/curl:8.10.1 -- \
   curl -sS --max-time 5 http://user-service:8081/actuator/health
 #    "Connection timed out"      -> enforced
-#    HTTP 200 with the health JSON -> not enforced (a stock kind cluster)
+#    HTTP 200 with the health JSON -> not enforced (a kind older than v0.24.0,
+#    or a CNI with no policy support at all)
 ```
 
 Kubelet traffic is deliberately unmentioned: health probes come from the node rather than from a Pod, and CNIs disagree about how to treat them, so a rule that tried to allow "just the kubelet" would be guessing.
@@ -908,7 +913,7 @@ Verified on this laptop (Trivy `0.76.1` and gitleaks `8.30.1`, both the official
 
 | Check | Result |
 |-------|--------|
-| `python .github/scripts/check-security.py` | `OK: 10 file(s), 21 document(s), 3 service account(s), 3 workload(s), 5 network policy(ies)`, exit 0 |
+| `python .github/scripts/check-security.py` | `OK: 13 file(s), 38 document(s), 5 service account(s), 4 workload(s), 12 network policy(ies)`, exit 0 (the counts grew with the Phase 8–10 agent; the Phase 7 tree alone read `10/21/3/3/5`) |
 | `check-security.py` on injected defects (1) | `FAILED: 3 problem(s)` — a literal `SPRING_DATASOURCE_PASSWORD`, a Deployment on the `default` account, a `:latest` image — exit 1 |
 | `check-security.py` on injected defects (2) | `FAILED: 2 problem(s)` — an empty `namespaceSelector`, and a NetworkPolicy selecting a workload that does not exist — exit 1 |
 | gitleaks — history | `gitleaks git` → `15 commits scanned`, `no leaks found`, exit 0 |
@@ -924,8 +929,8 @@ Two negative tests were run on purpose, because a linter that has only ever pass
 | Not verified | Why |
 |--------------|-----|
 | `trivy image` on the three service images | Docker Desktop's Linux engine answers HTTP 500 on this host (`C:` was down to 0.57 GB free; emptying `%TEMP%` raised it to 1.98 GB but the engine did not recover), so `docker build` cannot run locally. The `images` job is the only place an image is ever scanned. |
-| OWASP Dependency-Check against the NVD feed | The feed is large and rate-limited without `NVD_API_KEY`; running it locally would prove the feed, not the repository. It runs in the `dependencies` job. |
-| Applying the ServiceAccounts/NetworkPolicies to a live cluster, and enforcement | The manifests need a cluster, the engine above is down, and even a working laptop cluster runs `kindnetd`, which does not enforce them — see the check above. |
+| OWASP Dependency-Check against the NVD feed | The feed is large and, without `NVD_API_KEY`, no longer served at all: the NVD API answers a keyless request with an empty body, which the plugin turns into a `NullPointerException` inside `NvdCveClient._next` rather than a finding. Running that locally would prove the feed, not the repository, so the scan lives in the `dependencies` job and runs there once the secret exists. |
+| Applying the ServiceAccounts/NetworkPolicies to a live cluster, and enforcement | The manifests need a cluster and the engine above is down. The enforcement half has since been settled the hard way: the `cd` job runs on kind v0.33.0, which enforces policy, so the deployment smoke test is a real test of the rules above. |
 | `ansible-playbook` / `ansible-lint` for the changed deploy role | `ansible-core` cannot run on Windows (`OSError: [WinError 87]`), and `ansible-lint` imports the POSIX-only `grp` module. The change is exercised by CI's `iac` job and by the Debian control-node container instead. |
 | A real GitHub Actions run of `security.yml` | The workflow is not pushed yet; the first run happens with the Phase 7 commit. |
 
@@ -936,9 +941,9 @@ Two negative tests were run on purpose, because a linter that has only ever pass
 | `trivy config` dies with `FATAL Fatal error: unknown flag: --no-progress` | Trivy 0.76 removed the flag; it is a hard failure now, not a warning. Use `--quiet`, which still prints the report and only drops the progress bar. |
 | `trivy image` reports a HIGH in a package the base image ships and nobody can upgrade | Add `--ignore-unfixed`. A gate nobody can act on gets switched off, and the point of this one is that it stays on. |
 | gitleaks fails on a value that is no longer in any file | The clone still carries the history: `gitleaks git` reads every commit, which is exactly the leak that "I deleted the file" misses. Rotate the credential first, then either rewrite the history or add a justified entry to `.gitleaks.toml`. |
-| Dependency-Check takes 40 minutes or the NVD answers `403` | The public feed is rate-limited. Set the repository secret `NVD_API_KEY`; the job notices when it is absent instead of failing. |
+| Dependency-Check fails with `NoDataException: No documents exist`, or takes 40 minutes, or the NVD answers `403` | There is no usable keyless feed any more: the NVD API returns an empty body for a request without a key, and the plugin reports that as `NullPointerException` in `NvdCveClient._next` rather than as a vulnerability. Set the repository secret `NVD_API_KEY` (Settings > Secrets and variables > Actions, issued at nvd.nist.gov/developers/request-an-api-key); without it the job skips the scan and says so, instead of failing on a feed error that no dependency caused. |
 | The ServiceAccounts and NetworkPolicies exist in Git but not in the cluster | A non-recursive apply. `kubectl apply -f k8s/` silently skips `k8s/rbac/` and `k8s/network-policies/` — `kubectl apply -R -f k8s/` is required, and the Ansible role needs the same treatment. |
-| `kubectl -n devsecops get networkpolicy` lists all five policies but traffic is unaffected | The CNI does not enforce policy. Check with the two commands above; `kindnetd` is the usual answer. |
+| `kubectl -n devsecops get networkpolicy` lists the policies but traffic is unaffected | The CNI does not enforce policy. Check with the two commands above; a kindnet older than kind v0.24.0 is the usual answer, and a one-directional rule is the other one — an allowed *egress* still needs a matching *ingress* on the other side. |
 | A Pod can no longer resolve `user-service` | `default-deny-all` denies egress to everything, DNS included. `allow-dns-egress` is what restores `kube-system:53` over UDP **and** TCP. |
 | A Pod cannot reach the internet, so something in the image fails | That is the intended state. Add a specific egress rule for the destination that is really needed rather than removing `default-deny-all`. |
 | A Pod starts with more permission than intended, or `default` account shows in an audit log | A Pod that omits `serviceAccountName`, or sets it but forgets the Pod-level `automountServiceAccountToken: false`. `check-security.py` fails the build on both. |
@@ -978,7 +983,7 @@ The response carries the primary diagnosis (the first failed job's) *and* every 
 `DiagnosisEngine` has one method, and exactly one implementation is in the context at a time, chosen by `agent.llm.provider`:
 
 - **`heuristic`** (the default) answers from an ordered rule table inside the image — disk full, Docker socket missing, OOM, Maven dependency failure, compile error, test failure, registry auth, DNS, a leaked secret caught by gitleaks, a Trivy gate, a `kubectl` rollout failure, and a few more. It needs nothing installed, which is what makes the endpoint testable offline, what the CI job uses (a GitHub runner has no Ollama), and what the Phase 10 evaluation scores against — a deterministic engine is the only way "expected root cause" can be a stable assertion.
-- **`ollama`** posts the sanitized log to a local model with `format: json` and a fixed JSON contract, bounded by `max-output-tokens`. A parse failure is an upstream error, not a warning: a diagnosis the agent cannot read is not a diagnosis, and returning half of one would be worse than saying so.
+- **`ollama`** posts the sanitized log to a local model with `format: json` and a fixed JSON contract, bounded by `output-budget`. A parse failure is an upstream error, not a warning: a diagnosis the agent cannot read is not a diagnosis, and returning half of one would be worse than saying so.
 
 Both return the same record — root cause, evidence, suggested fix, `recommended_action`, confidence — so the endpoint, the comment and the tests are written once.
 
@@ -1028,7 +1033,7 @@ The controller is thin on purpose — validate, delegate, return — so all of t
 | Max log characters reaching an engine | `agent.limits.max-log-chars`, 12 000 | [`LogSanitizer.truncate`](services/agent-service/src/main/java/com/devsecops/agentservice/logs/LogSanitizer.java) — head 60 % / tail 40 %, with a marker naming how much was dropped |
 | Max failed jobs per request | `agent.limits.max-failed-jobs`, 3 | [`GithubClient.fetchFailedJobs`](services/agent-service/src/main/java/com/devsecops/agentservice/github/GithubClient.java) — the cap is applied before any download |
 | Max log bytes downloaded | 5 MiB | `GithubClient` — a ceiling on memory, deliberately looser than the model budget, because the failure is usually at the end of the log |
-| Model output budget | `agent.llm.max-output-tokens`, 700 | `OllamaDiagnosisEngine` |
+| Model output budget | `agent.llm.output-budget`, 700 | `OllamaDiagnosisEngine` |
 | GitHub / model timeout | `agent.limits.github-timeout-seconds`, 30 | Both HTTP clients |
 | Secrets in a log | — | `LogSanitizer` redacts `gh*_`/`github_pat_` tokens, `AKIA…` keys, `Bearer …`, `key=value` pairs, whole PEM blocks, and the agent's own configured token by literal match |
 | Secrets in the audit trail | — | `AuditLog` checks the **field name**, not the value, so a token passed by mistake is redacted without anyone having to think about it |

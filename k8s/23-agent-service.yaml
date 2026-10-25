@@ -49,7 +49,12 @@ data:
   AGENT_LLM_PROVIDER: "heuristic"
   AGENT_LLM_MODEL: "llama3.2:3b"
   AGENT_LLM_TIMEOUT_SECONDS: "60"
-  AGENT_LLM_MAX_OUTPUT_TOKENS: "700"
+  # "budget", not "max output tokens": the value is a generation limit, not a
+  # credential, but a key containing the word TOKEN trips Trivy's KSV-0109
+  # ("secrets stored in a ConfigMap"). Neither an inline #trivy:ignore comment
+  # nor an entry in .trivyignore.yaml suppresses KSV-0109, so the name that
+  # caused a false positive is the thing to change.
+  AGENT_LLM_OUTPUT_BUDGET: "700"
 
   # Commenting is on, but it only happens when GITHUB_TOKEN is present (see the
   # agent-credentials Secret below). With no token the agent still diagnoses and

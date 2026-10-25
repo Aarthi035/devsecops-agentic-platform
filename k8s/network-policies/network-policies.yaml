@@ -27,12 +27,15 @@
 #     A policy applies to packets hitting the Pod, which is after the Service
 #     has already done its port mapping.
 #
-# One caveat, because it matters and is easy to miss: kind's default CNI
-# (kindnetd) accepts these objects but does not enforce them. They are real
-# and correct, and they take effect the moment the cluster runs a
-# policy-capable CNI (Calico, Cilium, kube-router); on the stock laptop
-# cluster they are inert. See the Phase 7 README section for how to check
-# whether the CNI in front of you enforces them.
+# One caveat, because it matters and is easy to miss: a NetworkPolicy is only
+# a description, and the CNI is what enforces it. kind's default CNI
+# (kindnetd) has enforced NetworkPolicy since kind v0.24.0, where it delegates
+# to sigs.k8s.io/kube-network-policies - and this repository pins kind
+# v0.33.0 in .github/workflows/cd.yml. So these rules are load-bearing in CI,
+# and a rule that is merely *plausible* is not good enough: every conversation
+# in the list above needs a rule in both directions, because NetworkPolicy is
+# not transitive and one policy only ever opens one side. See the Phase 7
+# README section for how to check whether the CNI in front of you enforces them.
 #
 # kubelet traffic is deliberately not mentioned. Health probes come from the
 # node, not from a Pod, and how a CNI treats them varies, so a policy that
@@ -159,6 +162,65 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: product-service
+      ports:
+        - protocol: TCP
+          port: 8082
+---
+# The other two thirds of the same conversation.
+#
+# NetworkPolicy is one-directional: the egress rule above lets order-service's
+# packets leave, and these two rules let them arrive. Without them
+# default-deny-all still drops the connection on user-service's and
+# product-service's side, so order-service fails on "user-service:" with a
+# connect timeout while /api/users and /api/products - which arrive from the
+# Ingress controller, not from a Pod in this namespace - keep working. That is
+# exactly the asymmetry that made the CD smoke test fail on /api/orders alone.
+#
+# They are one policy per target rather than one policy with a shared
+# podSelector, because a NetworkPolicy has a single podSelector and user-service
+# listens on 8081 while product-service listens on 8082. Selecting both with
+# app.kubernetes.io/part-of would also hand each of them the other's port, which
+# is a wider rule than the traffic justifies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-service-into-user-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: user-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: order-service
+      ports:
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-service-into-product-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: product-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: order-service
       ports:
         - protocol: TCP
           port: 8082

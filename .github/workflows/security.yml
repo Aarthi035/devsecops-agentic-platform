@@ -95,13 +95,25 @@ jobs:
       #   dir - the files as they are now, including ones .gitignore hides
       # --redact keeps the matched secret out of the log; the SARIF files hold
       # the finding, and they are uploaded rather than printed.
+      #
+      # The reports are written to $RUNNER_TEMP, outside the repository. Written
+      # into the tree they become part of the next scan's input: "gitleaks dir"
+      # reads the tree, so the SARIF the git scan just wrote - a file that
+      # describes a finding - was itself reported as a finding, and the job
+      # failed twice for one leak. The report never belongs inside what is being
+      # scanned.
+      #
+      # .gitleaksignore holds the fingerprints of findings that are known to be
+      # false positives; see that file for the one entry and why it is there.
       - name: Scan the history and the working tree
+        env:
+          REPORT_DIR: ${{ runner.temp }}
         run: |
           status=0
           gitleaks git --no-banner --redact \
-            --report-format sarif --report-path gitleaks-git.sarif --exit-code 1 || status=1
+            --report-format sarif --report-path "${REPORT_DIR}/gitleaks-git.sarif" --exit-code 1 || status=1
           gitleaks dir --no-banner --redact \
-            --report-format sarif --report-path gitleaks-dir.sarif --exit-code 1 || status=1
+            --report-format sarif --report-path "${REPORT_DIR}/gitleaks-dir.sarif" --exit-code 1 || status=1
           exit "${status}"
 
       - name: Upload the reports
@@ -109,7 +121,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gitleaks-reports
-          path: gitleaks-*.sarif
+          path: ${{ runner.temp }}/gitleaks-*.sarif
           retention-days: 7
           if-no-files-found: warn
 
@@ -251,21 +263,32 @@ jobs:
           restore-keys: |
             dependency-check-${{ runner.os }}
 
-      # NVD_API_KEY is a repository secret. When it is absent the scan still
-      # runs - the plugin's "no key" path is a slower, rate-limited feed, which
-      # is exactly what a fork's pull request gets, since GitHub does not pass
-      # secrets to workflows triggered from a fork.
+      # NVD_API_KEY is a repository secret, and it is now required. The old
+      # comment here said an absent key meant "a slower, rate-limited feed"; that
+      # path no longer exists. The NVD API answers keyless requests with an empty
+      # body, and dependency-check reads that as a malformed feed and dies with a
+      # NullPointerException inside NvdCveClient._next, wrapped in UpdateException
+      # and then NoDataException - a build failure with no dependency finding in
+      # it, which is the worst kind: it looks like a security failure and is not.
+      #
+      # So an absent key skips the scan loudly instead of failing. Failing would
+      # only ever be fixable by the repository owner, and a red X on every fork's
+      # pull request (GitHub does not pass secrets to fork-triggered runs) is how
+      # a gate gets switched off. Add the key under Settings > Secrets and
+      # variables > Actions > New repository secret to turn the scan back on;
+      # https://nvd.nist.gov/developers/request-an-api-key issues them.
       - name: Run OWASP Dependency-Check
         working-directory: services/${{ matrix.service }}
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           if [ -z "${NVD_API_KEY}" ]; then
-            echo "::notice::NVD_API_KEY is not set - falling back to the rate-limited public NVD feed."
-            echo "::notice::Set it in Settings > Secrets and variables > Actions to speed this up."
-          else
-            echo "Using the NVD API key provided by the repository secret."
+            echo "::warning::NVD_API_KEY is not set - skipping OWASP Dependency-Check."
+            echo "::warning::The NVD API rejects keyless requests, so there is no scan to run."
+            echo "::warning::Add the secret (Settings > Secrets and variables > Actions) to enable it."
+            exit 0
           fi
+          echo "Using the NVD API key provided by the repository secret."
           mvn $MAVEN_ARGS -Dnvd.api.key="${NVD_API_KEY}" dependency-check:check
 
       - name: Upload the report
