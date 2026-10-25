@@ -1,57 +1,41 @@
-# Trivy suppressions, read automatically by both scanner jobs in
-# .github/workflows/security.yml - "config" (misconfiguration, secrets) and
-# "images" (the four service images).
+# Trivy suppressions for the "images" job in .github/workflows/security.yml.
 #
-# Nothing here suppresses a misconfiguration. The entries are the four Jackson
-# CVEs the image scan still reports after the four poms pinned
-# jackson-bom.version to 3.1.6.
+# Passed in with --ignorefile, and that flag is not optional: this Trivy
+# (0.76.1) does not look for a YAML ignore file on its own. Auto-discovery
+# checks for a file named ".trivyignore" and nothing else, so without the flag
+# the scan runs with the entries below silently ignored - which is exactly the
+# first thing this file got wrong. If a scan ever reports a CVE that is listed
+# here, check the flag before editing the list.
 #
-# Why 3.1.6 and not higher: Spring Boot 4.1.1 manages Jackson 3.1.5, and the
-# image scan reports five HIGH findings against it. 3.2.2 is the newest
-# jackson-bom on Maven Central - and it does not run here. Its jackson-databind
-# calls com.fasterxml.jackson.annotation.JsonApplyView, the annotations version
-# Boot 4.1.1 manages does not ship it, and the first serialized response dies
-# with NoClassDefFoundError. 3.1.6 is the newest release that runs, and it does
-# clear CVE-2026-68497 in jackson-databind, whose fix version is exactly 3.1.6.
+# Why this list is one entry long. Spring Boot 4.1.1 manages Jackson 3.1.5, and
+# the image scan reports five HIGH findings against it. The four poms pin
+# jackson-bom.version to 3.1.8, the newest release on the 3.1 line, which meets
+# every fix version Trivy names for four of the five (3.1.6, 3.1.7, 3.1.7 and
+# 3.1.7). The 3.1 line is the ceiling: 3.2.x does not run here. Its
+# jackson-databind asks for com.fasterxml.jackson.annotation.JsonApplyView, an
+# annotation the jackson-annotations 2.x artifact - the only annotations
+# artifact there is, and the one Boot 4.1.1 manages - does not have, so the
+# first serialized response dies with NoClassDefFoundError. Verified, not
+# assumed: 3.2.2 fails the user-service suite that way.
 #
-# The four that remain cannot be upgraded away today:
-#
-#   CVE-2026-89407  jackson-core    - denial of service while parsing
-#                                     (fix names 3.1.7 / 3.2.2; 3.1.7 is not on
-#                                     Maven Central and 3.2.2 does not run)
-#   CVE-2026-89425  jackson-core    - denial of service: unbounded
-#                                     StringBuilder growth while parsing a
-#                                     malformed token (fix names 3.1.7 / 3.2.3,
-#                                     neither published)
-#   CVE-2026-91776  jackson-databind - denial of service: unbounded cache
-#                                     growth in TypeDeserializerBase (fix names
-#                                     3.1.7 / 3.2.3, neither published)
 #   CVE-2026-91777  jackson-databind - denial of service: quadratic
-#                                     forward-reference completion
+#                                     forward-reference completion. It is the
+#                                     one finding left, and no release that this
+#                                     stack can install fixes it.
 #
-# All four are denial of service through parsing. None is code execution and
-# none is memory corruption. They are reachable - the three services parse
-# request bodies, and the agent parses GitHub, Ollama and Alertmanager
-# responses - so this is an accepted risk with a named blast radius (a request
-# that consumes CPU until the container is restarted), not a dismissal. The
-# alternative, a permanently red security gate that no one can make green, is
-# how gates get turned off.
+# It is a denial of service through parsing. Two of the four services parse
+# request bodies and the agent parses GitHub, Ollama and Alertmanager
+# responses, so the finding is reachable - this is an accepted risk with a
+# named blast radius (a request that consumes CPU until the container is
+# restarted), not a dismissal. The alternative, a permanently red security gate
+# that no one can make green, is how gates get turned off.
 #
 # expired_at is the forcing function: Trivy stops honouring an entry once the
-# date passes, so the first scan after 2026-12-31 fails again on these four and
-# the versions get re-checked. Deleting the entries is the better end to this -
-# when a Jackson release above 3.1.6 both ships and runs on Boot 4.1.1, raise
-# jackson-bom.version in the four poms and remove all four.
+# date passes, so the first scan after 2026-12-31 fails again on this CVE and
+# the Jackson versions get re-checked. Deleting the entry is the better end to
+# this - when a Jackson release above 3.1.8 both ships and runs on Boot 4.1.1,
+# raise jackson-bom.version in the four poms and remove this file.
 vulnerabilities:
-  - id: CVE-2026-89407
-    statement: Trivy names 3.1.7 as a fix and 3.1.7 is not published on Maven Central; the newest jackson-bom is 3.2.2 and 3.2.2 does not run on Spring Boot 4.1.1. Accepted until a release above 3.1.6 both ships and runs.
-    expired_at: 2026-12-31
-  - id: CVE-2026-89425
-    statement: Trivy names 3.1.7 / 3.2.3 as fixes and neither is published on Maven Central; the newest jackson-bom is 3.2.2 and 3.2.2 does not run on Spring Boot 4.1.1. Accepted until a release above 3.1.6 both ships and runs.
-    expired_at: 2026-12-31
-  - id: CVE-2026-91776
-    statement: Trivy names 3.1.7 / 3.2.3 as fixes and neither is published on Maven Central; the newest jackson-bom is 3.2.2 and 3.2.2 does not run on Spring Boot 4.1.1. Accepted until a release above 3.1.6 both ships and runs.
-    expired_at: 2026-12-31
   - id: CVE-2026-91777
-    statement: No released Jackson version fixes this; the newest jackson-bom is 3.2.2 and 3.2.2 does not run on Spring Boot 4.1.1. Accepted until a release above 3.1.6 both ships and runs.
+    statement: No Jackson release this stack can install fixes this; 3.2.x is the only line above the 3.1.8 ceiling and it does not run on Spring Boot 4.1.1 (NoClassDefFoundError on JsonApplyView). Accepted until a release above 3.1.8 both ships and runs.
     expired_at: 2026-12-31

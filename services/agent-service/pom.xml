@@ -25,15 +25,16 @@
              fails on the HIGH Tomcat CVEs that 11.0.25 fixes. -->
         <tomcat.version>11.0.26</tomcat.version>
         <!-- Same reason as Tomcat, one line up: 4.1.1 manages Jackson 3.1.5,
-             and the "Image" job reports five HIGH CVEs against it. 3.2.2, the
-             newest jackson-bom there is, clears all five - and does not run
-             here: its databind asks for
-             com.fasterxml.jackson.annotation.JsonApplyView, the annotations
-             version Boot 4.1.1 manages does not have it, and the first
-             serialized response dies with NoClassDefFoundError. 3.1.6 is the
-             newest release that does run, and it fixes CVE-2026-68497.
-             .trivyignore.yaml records the four that are left, and why. -->
-        <jackson-bom.version>3.1.6</jackson-bom.version>
+             and the "Image" job reports five HIGH CVEs against it. 3.1.8 is
+             the newest release on the 3.1 line, and that line is the ceiling:
+             3.2.x does not run here. Its jackson-databind asks for
+             com.fasterxml.jackson.annotation.JsonApplyView, an annotation the
+             jackson-annotations 2.x artifact - the only annotations artifact
+             there is, and the one Boot 4.1.1 manages - does not have, so the
+             first serialized response dies with NoClassDefFoundError. 3.1.8
+             meets every fix version Trivy names for four of the five; the
+             fifth is the one entry .trivyignore.yaml records, and why. -->
+        <jackson-bom.version>3.1.8</jackson-bom.version>
         <!-- Phase 7. Empty means "no key": the "Dependencies" job in
              .github/workflows/security.yml passes the real one in with
              -Dnvd.api.key when the repository secret exists, so a local run

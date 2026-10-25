@@ -215,11 +215,20 @@ jobs:
       # --ignore-unfixed is the difference between a useful gate and one that
       # fails every build: a HIGH in a package the base image ships with no fix
       # for cannot be acted on, and a gate that nobody can act on gets disabled.
+      #
+      # --ignorefile has to be spelled out. Trivy's auto-discovery looks for a
+      # file named ".trivyignore" and only that name, so a
+      # ".trivyignore.yaml" sitting in the repository root is found by nothing
+      # and the scan runs as if it were not there - which is how the four
+      # Jackson CVEs this file records stayed in the report while the entries
+      # for them looked correct. See .trivyignore.yaml for what is in it and
+      # why.
       - name: Scan the image
         run: |
           trivy image \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
+            --ignorefile .trivyignore.yaml \
             --exit-code 1 \
             --quiet \
             "devsecops/${{ matrix.service }}:scan"
