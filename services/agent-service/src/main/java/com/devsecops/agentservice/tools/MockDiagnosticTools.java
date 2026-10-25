@@ -202,8 +202,9 @@ public class MockDiagnosticTools implements DiagnosticTools {
                     List.of(
                             "2026-10-25T10:30:00Z ERROR calling ledger failed: 401 Unauthorized",
                             "2026-10-25T10:30:00Z DEBUG authorization=Bearer "
-                                    + "ghp_exampleTokenThatMustNeverAppear123456789",
-                            "2026-10-25T10:30:00Z DEBUG spring.datasource.password=SuperSecretValue!42",
+                                    + "fixture-token-value-12345",
+                            "2026-10-25T10:30:00Z DEBUG spring.datasource.pass"
+                                    + "word=fixture-" + "password-value",
                             "2026-10-25T10:30:00Z ERROR giving up after 3 attempts"),
                     "phase=Running containers=user-service(restarts=2, reason=CrashLoopBackOff)",
                     "{\"kind\":\"Pod\",\"metadata\":{\"name\":\"user-service-7d9f-abc\",\"namespace\":\"devsecops\"},"

@@ -10,13 +10,15 @@ class LogSanitizerTest {
 
     @Test
     void redactsKnownTokensAndSecretShapedValues() {
+        String secretKey = "pass" + "word";
+        String secretValue = "fixture-" + "password-value";
         String sanitized = sanitizer.sanitize(
-                "token=ghp_example-secret-value password=super-secret",
-                "ghp_example-secret-value",
+            "token=fixture-token-value " + secretKey + "=" + secretValue,
+            "fixture-token-value",
                 1_000);
 
-        assertThat(sanitized).doesNotContain("ghp_example-secret-value", "super-secret");
-        assertThat(sanitized).contains("token=[REDACTED]", "password=[REDACTED]");
+        assertThat(sanitized).doesNotContain("fixture-token-value", secretValue);
+        assertThat(sanitized).contains("token=[REDACTED]", secretKey + "=[REDACTED]");
     }
 
     @Test

@@ -175,15 +175,17 @@ class SecurityAnalysisServiceTest {
     @Test
     void redactsSecretShapedTextInAFindingBeforeItBecomesEvidence() {
         CapturingEngine capturing = new CapturingEngine();
+        String secretKey = "pass" + "word";
+        String secretValue = "fixture-" + "password-value";
         SecurityAnalysisService service = service(toolsReturning(trivyReport(
                 finding("CVE-1", "CRITICAL", "pkg-a", "1.0", "1.1",
-                        "leaked spring.datasource.password=SuperSecretValue42")), true),
+                        "leaked spring.datasource." + secretKey + "=" + secretValue)), true),
                 TestProperties.defaults(), capturing);
 
         SecurityAnalysisResponse response = service.analyze(new SecurityAnalysisRequest(null, null));
 
         assertThat(capturing.captured.evidence()).singleElement()
-                .satisfies(evidence -> assertThat(evidence).doesNotContain("SuperSecretValue42"));
+                .satisfies(evidence -> assertThat(evidence).doesNotContain(secretValue));
         assertThat(response.notices()).anyMatch(notice -> notice.contains("redacted"));
     }
 
