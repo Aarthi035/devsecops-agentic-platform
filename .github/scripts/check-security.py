@@ -18,6 +18,9 @@ What it checks, and why each one is here:
             mounted, and the three service accounts in k8s/rbac/ are bound to
             nothing at all. A ServiceAccount with no Role has no permissions,
             which is the correct amount for a service that never calls the API.
+            The one documented exception is the Phase 9 agent, which does call
+            it - and that exception is conditional on a read-only Role existing
+            to bound the token it mounts.
   * Pods    the Pod-level hardening Phase 4 introduced is still there
             (runAsNonRoot, no privilege escalation, read-only root filesystem,
             all capabilities dropped, a readiness probe) - a security phase
@@ -51,6 +54,17 @@ K8S_DIR = os.path.join(REPO_ROOT, "k8s")
 NAMESPACE = "devsecops"
 SERVICE_ACCOUNTS_FILE = os.path.join("k8s", "rbac", "serviceaccounts.yaml")
 
+# The Phase 9 agent is the one workload that calls the API server, so it is the
+# one identity permitted to mount a ServiceAccount token. The permission is not
+# a file name or a hard-coded exception list - it is keyed on the agent's own
+# label, so flipping automountServiceAccountToken anywhere else still fails - and
+# it is conditional: the Role below must exist and must grant read verbs only.
+# Delete the Role, or add "patch" to it, and the agent's mount stops being
+# allowed.
+AGENT_LABEL = {"app.kubernetes.io/name": "agent-service"}
+AGENT_DIAGNOSTICS_ROLE = "agent-diagnostics"
+READ_ONLY_VERBS = {"get", "list", "watch"}
+
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 
 # A key like SPRING_DATASOURCE_PASSWORD or GRAFANA_ADMIN_TOKEN must never hold
@@ -74,11 +88,36 @@ checked = {"files": 0, "documents": 0, "accounts": 0, "workloads": 0, "policies"
 service_accounts: dict[str, str] = {}
 config_objects: set[str] = set()
 pod_label_sets: list[frozenset[str]] = []
+roles: dict[str, dict] = {}
+agent_token_mounted = False
+agent_diagnostics_bound = False
 default_deny_found = False
 
 
 def fail(message: str) -> None:
     failures.append(message)
+
+
+def is_agent(labels: dict) -> bool:
+    """Whether a label set identifies the Phase 9 agent."""
+    return all(labels.get(key) == value for key, value in AGENT_LABEL.items())
+
+
+def token_mount_is_allowed(labels: dict) -> bool:
+    """Whether one automountServiceAccountToken: true is the agent's exception.
+
+    Anything that is not the agent is refused outright. The agent's own flag is
+    still only *provisionally* allowed - it becomes an actual failure in
+    check_agent_role() if the read-only Role it depends on is missing or has
+    picked up a write verb.
+    """
+    global agent_token_mounted
+
+    if is_agent(labels):
+        agent_token_mounted = True
+        return True
+
+    return False
 
 
 def load_documents() -> list[tuple[str, dict]]:
@@ -130,6 +169,9 @@ def collect(relative: str, document: dict) -> None:
         labels = (template.get("metadata") or {}).get("labels") or {}
         pod_label_sets.append(frozenset(f"{key}={value}" for key, value in labels.items()))
 
+    if kind == "Role":
+        roles[metadata.get("name", "")] = document
+
 
 def check_service_account(relative: str, document: dict) -> None:
     metadata = document.get("metadata") or {}
@@ -143,9 +185,12 @@ def check_service_account(relative: str, document: dict) -> None:
         fail(f"{relative}: ServiceAccount/{name} has no app.kubernetes.io/name label")
 
     # Without this the kubelet mounts the account's token into the container,
-    # which is the liability the whole least-privilege arrangement removes.
+    # which is the liability the whole least-privilege arrangement removes. The
+    # agent is the one identity that needs the mount, and check_agent_role()
+    # then requires the read-only Role that bounds it.
     if document.get("automountServiceAccountToken") is not False:
-        fail(f"{relative}: ServiceAccount/{name} does not set automountServiceAccountToken: false")
+        if not token_mount_is_allowed(metadata.get("labels") or {}):
+            fail(f"{relative}: ServiceAccount/{name} does not set automountServiceAccountToken: false")
 
 
 def check_workload(relative: str, document: dict) -> None:
@@ -169,9 +214,12 @@ def check_workload(relative: str, document: dict) -> None:
         fail(f"{where} names ServiceAccount '{account}', which no manifest under k8s/ declares")
 
     # Belt and braces with the ServiceAccount's own flag: a Pod that forgot
-    # this would re-introduce the mount even if the account forbids it.
+    # this would re-introduce the mount even if the account forbids it. The
+    # agent is the one exception, and only provisionally - see check_agent_role.
     if pod_spec.get("automountServiceAccountToken") is not False:
-        fail(f"{where} does not set automountServiceAccountToken: false on the Pod spec")
+        pod_labels = ((document.get("spec") or {}).get("template") or {}).get("metadata") or {}
+        if not token_mount_is_allowed(pod_labels.get("labels") or {}):
+            fail(f"{where} does not set automountServiceAccountToken: false on the Pod spec")
 
     pod_security = pod_spec.get("securityContext") or {}
     if pod_security.get("runAsNonRoot") is not True:
@@ -324,17 +372,58 @@ def check_role_binding(relative: str, document: dict) -> None:
     "No Role" is the grant. If a RoleBinding ever appears for one of them, the
     service has acquired permissions nobody asked for - which is the exact
     failure mode least-privilege RBAC exists to prevent.
+
+    The agent's own RoleBinding is the deliberate exception: it is recorded here
+    so check_agent_role() can require it rather than forbid it.
     """
+    global agent_diagnostics_bound
+
     declarers = {name for name, path in service_accounts.items() if os.path.normpath(path) == os.path.normpath(SERVICE_ACCOUNTS_FILE)}
+    role_ref = (document.get("roleRef") or {}).get("name")
 
     for subject in document.get("subjects") or []:
         if subject.get("kind") != "ServiceAccount":
             continue
+        if role_ref == AGENT_DIAGNOSTICS_ROLE and subject.get("name") == "agent-service":
+            agent_diagnostics_bound = True
         if subject.get("name") in declarers:
             fail(
                 f"{relative}: {document['kind']}/{(document.get('metadata') or {}).get('name', '<unnamed>')} "
                 f"grants permissions to ServiceAccount '{subject.get('name')}', which is supposed to have none"
             )
+
+
+def check_agent_role() -> None:
+    """The compensating control that makes the agent's token mount acceptable.
+
+    A token in the agent's container is only safe while the Role it maps to can
+    do nothing but read. This turns "the agent may mount a token" into "the agent
+    may mount a token *because* a read-only Role is there and is bound to it" -
+    so deleting the Role, widening it, or leaving the binding out is a build
+    failure rather than a silent regression in the Phase 7 posture.
+    """
+    if not agent_token_mounted:
+        return
+
+    role = roles.get(AGENT_DIAGNOSTICS_ROLE)
+    if role is None:
+        fail(
+            f"the agent mounts a ServiceAccount token but no Role/{AGENT_DIAGNOSTICS_ROLE} "
+            "exists under k8s/ to bound what that token may do"
+        )
+        return
+
+    for rule in role.get("rules") or []:
+        verbs = {str(verb).lower() for verb in rule.get("verbs") or []}
+        extra = sorted(verbs - READ_ONLY_VERBS)
+        if extra:
+            fail(
+                f"Role/{AGENT_DIAGNOSTICS_ROLE} grants {extra} on "
+                f"{(rule.get('resources') or [])}, so the token the agent mounts is not read-only"
+            )
+
+    if not agent_diagnostics_bound:
+        fail(f"Role/{AGENT_DIAGNOSTICS_ROLE} is declared but not bound to ServiceAccount 'agent-service'")
 
 
 def check_no_literal_secrets(relative: str, document: dict) -> None:
@@ -368,6 +457,10 @@ def main() -> int:
             check_role_binding(relative, document)
         elif kind in {"ConfigMap", "Secret"}:
             check_no_literal_secrets(relative, document)
+
+    # Runs last, on the whole picture: it is the only check that spans a
+    # ServiceAccount, a Pod and a Role at once.
+    check_agent_role()
 
     # A phase whose whole point is a closed namespace and powerless identities
     # should not be able to lose either in a refactor without CI noticing.

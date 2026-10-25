@@ -1,12 +1,18 @@
-# agent-service: the DevOps Assistant Agent (Phase 8).
+# agent-service: the DevOps Assistant Agent (Phases 8-9).
 #
 # The agent is the fourth workload in the namespace and the first one that has
-# an opinion about the outside world: it reads GitHub, and (from Phase 9) reads
-# Prometheus, Loki, the API server and the Trivy reports. Everything the
-# namespace already enforces still applies to it - it runs non-root, with a
-# read-only root filesystem, its own ServiceAccount and no token mount - and the
-# two things it needs that the other services do not are its own ConfigMap and
-# its own egress rules (k8s/network-policies/agent-service-policies.yaml).
+# an opinion about the outside world: it reads GitHub, Prometheus, Loki, the API
+# server and the Trivy reports. Everything the namespace already enforces still
+# applies to it - it runs non-root, with a read-only root filesystem and its own
+# ServiceAccount - and the things it needs that the other services do not are
+# its own ConfigMap, its own RBAC (k8s/rbac/agent-rbac.yaml) and its own egress
+# rules (k8s/network-policies/agent-service-policies.yaml).
+#
+# Phase 9 is also where the token mount flips on. Phase 7 and 8 left
+# automountServiceAccountToken false because nothing called the API server; the
+# investigation tools do, so the token is now mounted - against the read-only
+# `agent-diagnostics` Role, which grants get/list/watch on Pods, logs, Services,
+# ConfigMaps, Events and the apps workload specs, and nothing else.
 #
 # Deliberately NOT in app-config: the agent shares no configuration with the
 # three services, and putting its LLM and GitHub settings next to
@@ -19,11 +25,10 @@ metadata:
   labels:
     app.kubernetes.io/name: agent-service
     app.kubernetes.io/part-of: devsecops-platform
-# Phase 8 does not call the Kubernetes API. Phase 9's read-only tools do, and
-# they flip this to true in k8s/rbac/agent-rbac.yaml - where the Role that makes
-# the token worth mounting is defined. Until then the token would be pure
-# liability, exactly as in Phase 7.
-automountServiceAccountToken: false
+# Phase 9: the read-only tools call the Kubernetes API, so the token is worth
+# mounting now - the Role that makes it so is in k8s/rbac/agent-rbac.yaml, and
+# it grants reads and nothing else.
+automountServiceAccountToken: true
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -56,16 +61,74 @@ data:
   AGENT_MAX_LOG_CHARS: "12000"
   AGENT_MAX_FAILED_JOBS: "3"
   AGENT_GITHUB_TIMEOUT_SECONDS: "30"
+
+  # --- Phase 9: the read-only tools ----------------------------------------
+  #
+  # "live" talks to the real Prometheus, Loki and API server. "mock" answers
+  # from fixtures inside the image and contacts nothing - useful for a demo
+  # that must not depend on the monitoring stack being up, and it is what the
+  # Phase 10 evaluation runs in. This one switch governs the read-only tools
+  # and the action executor together: in mock mode the agent can neither read a
+  # cluster nor change one.
+  AGENT_TOOLS_MODE: "live"
+  AGENT_PROMETHEUS_URL: "http://prometheus.monitoring.svc.cluster.local:9090/prometheus"
+  AGENT_LOKI_URL: "http://loki.monitoring.svc.cluster.local:3100"
+  AGENT_TOOLS_TIMEOUT_SECONDS: "10"
+  AGENT_TOOLS_RETRIES: "1"
+  AGENT_TOOLS_MAX_SAMPLES: "20"
+  AGENT_TOOLS_MAX_LOG_LINES: "200"
+
+  # The "max steps" guardrail for a Phase 9 investigation, where a step is a
+  # tool call. Shared by every alert in one notification rather than granted
+  # per alert, so a large alert group cannot multiply it.
+  AGENT_MAX_TOOL_CALLS: "12"
+
+  # --- Phase 9: what bounds one alert investigation ------------------------
+  AGENT_INCIDENT_DEDUP_WINDOW_SECONDS: "300"
+  AGENT_INCIDENT_MAX_ALERTS: "20"
+  AGENT_INCIDENT_LOOKBACK_SECONDS: "300"
+  AGENT_INCIDENT_NAMESPACE: "devsecops"
+
+  # --- Phase 9: where scanner reports are read from ------------------------
+  #
+  # report-directory is a boundary, not a default: a requested path is resolved
+  # inside it and refused if it escapes (including through a symlink), so
+  # POST /analyze-security cannot be used to read an arbitrary file.
+  AGENT_SECURITY_REPORT_PATH: "/reports/trivy.json"
+  AGENT_SECURITY_REPORT_DIRECTORY: "/reports"
+  AGENT_SECURITY_MAX_FINDINGS: "50"
+  AGENT_SECURITY_MAX_REPORT_BYTES: "2097152"
+
+  # --- Phase 9: who may authorise a state change ---------------------------
+  #
+  # The TTL is here; the token is not. AGENT_APPROVAL_TOKEN comes from the
+  # agent-credentials Secret below, because it is a credential and a ConfigMap
+  # is readable by anything in the namespace. With no token configured the
+  # agent still proposes actions, and POST /approve refuses them with a 401.
+  AGENT_APPROVAL_TTL_SECONDS: "900"
+  AGENT_APPROVAL_MAX_RETAINED: "100"
 ---
 # Created at deploy time, never committed - same rule as k8s/11-secret.yaml.
 #
 #   kubectl create secret generic agent-credentials -n devsecops \
 #     --from-literal=GITHUB_TOKEN=ghp_... \
+#     --from-literal=AGENT_APPROVAL_TOKEN="$(openssl rand -hex 32)" \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
 # The token needs the narrowest scope that works: "actions: read" to fetch runs
 # and logs, plus "issues: write" (or "pull_requests: write") only if the agent
 # should comment. Nothing else - the agent never pushes code or merges.
+#
+# AGENT_APPROVAL_TOKEN is Phase 9: it is the credential a human presents to
+# POST /approve/{actionId}. It is deliberately not optional in spirit - leaving
+# it out is a supported configuration in which the agent proposes actions and
+# every approval is refused with a 401. Two more keys can live here on a
+# deployment that is meant to act or to read private metrics, and their absence
+# is also a supported configuration:
+#
+#   AGENT_EXECUTOR_TOKEN    the write credential. Blank means the agent cannot
+#                           change anything, which is the default posture.
+#   AGENT_PROMETHEUS_TOKEN  only if Prometheus is behind an authenticating proxy.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -105,7 +168,10 @@ spec:
         app.kubernetes.io/part-of: devsecops-platform
     spec:
       serviceAccountName: agent-service
-      automountServiceAccountToken: false
+      # Phase 9 reads the API server, so the token is mounted here too - belt
+      # and braces with the ServiceAccount's own flag, so a Pod that forgets one
+      # still gets the other. The read-only Role is what bounds it.
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -141,6 +207,19 @@ spec:
                   name: agent-credentials
                   key: GITHUB_TOKEN
                   optional: true
+            # Phase 9's human gate. Absent is fine: the agent proposes, and the
+            # approval endpoint refuses with a 401 until an operator sets it.
+            - name: AGENT_APPROVAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-credentials
+                  key: AGENT_APPROVAL_TOKEN
+                  optional: true
+            # Deliberately not read here: AGENT_EXECUTOR_TOKEN must come from the
+            # separate agent-executor credential described in
+            # k8s/rbac/agent-rbac.yaml, not from this Secret. Mounting the
+            # agent's own token as the executor credential would defeat the
+            # point of having two identities.
           resources:
             # Bigger than the three services: the request has to cover a JVM plus
             # a truncated job log (12 000 characters by default, but a fetched
@@ -177,9 +256,37 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # Phase 9: scanner reports. Read-only, and a ConfigMap rather than a
+            # volume because a Trivy JSON report is a document, not a stateful
+            # file. optional: true means the Pod starts without it and
+            # POST /analyze-security answers 200 with accepted:false and a
+            # diagnosis saying the report was missing - which is the correct
+            # answer, not a crash.
+            #
+            #   kubectl create configmap agent-security-reports -n devsecops \
+            #     --from-file=trivy.json=reports/trivy.json
+            - name: security-reports
+              mountPath: /reports
+              readOnly: true
+            # NOT mounted by default. Uncomment together with the volume below
+            # and set AGENT_EXECUTOR_TOKEN_FILE to enable acting, as described
+            # in k8s/rbac/agent-rbac.yaml. Left commented so the checked-in
+            # manifest describes a deployment that reads and proposes only.
+            #
+            # - name: executor-token
+            #   mountPath: /var/run/secrets/agent-executor
+            #   readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: security-reports
+          configMap:
+            name: agent-security-reports
+            optional: true
+        # - name: executor-token
+        #   secret:
+        #     secretName: agent-executor-token
+        #     optional: true
 ---
 apiVersion: v1
 kind: Service
@@ -200,12 +307,19 @@ spec:
       protocol: TCP
 ---
 # Its own Ingress rather than a fourth path on devsecops-api: the agent's routes
-# are not under /api (the spec fixes /analyze-ci, /alert and /analyze-security),
-# and keeping them in this file means the platform's public API surface and the
-# agent's trigger surface stay separately reviewable.
+# are not under /api (the spec fixes /analyze-ci, /alert, /analyze-security and
+# /approve), and keeping them in this file means the platform's public API
+# surface and the agent's trigger surface stay separately reviewable.
 #
 # This is how a GitHub Actions job on a self-hosted runner - or curl from the
-# laptop - reaches POST /analyze-ci through port 8090.
+# laptop - reaches the agent through port 8090.
+#
+# /approve is the only one of the four that can change anything, and it is
+# exposed for the same reason the others are: the demo is a curl. It is not
+# unguarded - every request must present the approval token, and without one
+# the answer is a 401 - but a deployment that does not want the write path
+# reachable from outside the cluster can simply drop that path here and approve
+# with an in-cluster curl instead.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -220,6 +334,30 @@ spec:
     - http:
         paths:
           - path: /analyze-ci
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-service
+                port:
+                  number: 8085
+          # Phase 9: the Alertmanager webhook receiver. Alertmanager calls this
+          # in-cluster (see monitoring/alertmanager/configmap.yaml); the Ingress
+          # path is here so the same endpoint can be exercised by hand.
+          - path: /alert
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-service
+                port:
+                  number: 8085
+          - path: /analyze-security
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-service
+                port:
+                  number: 8085
+          - path: /approve
             pathType: Prefix
             backend:
               service:

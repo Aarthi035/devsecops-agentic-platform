@@ -2,10 +2,15 @@
 #
 # Phase 6 wires Prometheus -> Alertmanager and leaves delivery alone: the agent
 # webhook that actually consumes these alerts is Phase 9 (POST /alert on
-# agent-service). A receiver with no integrations is valid Alertmanager config
-# - it accepts the notification and records it, which is what makes the firing
-# alert visible in the Alertmanager UI. That visibility is what this phase
-# verifies.
+# agent-service, port 8085). A receiver with no integrations is valid
+# Alertmanager config - it accepts the notification and records it, which is what
+# makes the firing alert visible in the Alertmanager UI. That visibility is what
+# Phase 6 verifies.
+#
+# Phase 9 adds the agent as a webhook receiver, so a firing alert is now both
+# visible in the UI and diagnosed automatically. See
+# k8s/network-policies/agent-service-policies.yaml for the NetworkPolicy that
+# lets this cross the namespace boundary.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,12 +35,27 @@ data:
 
     receivers:
       - name: default
-        # Phase 9 adds the agent here, and routes to it, without touching
-        # anything else in this file:
-        #
-        #   webhook_configs:
-        #     - url: http://agent-service.<namespace>.svc.cluster.local:<port>/alert
-        #       send_resolved: true
-        #
-        # The host, port and path are whatever Phase 9 gives agent-service - the
-        # point is that delivery is the only thing this phase leaves out.
+        webhook_configs:
+          # The agent's Phase 9 trigger. The name is fully qualified - namespace
+          # first, then svc, then the cluster domain - because Alertmanager runs
+          # in the monitoring namespace, where the bare "agent-service" does not
+          # resolve.
+          #
+          # send_resolved is on so the agent sees a recovery as well as a
+          # failure: a resolved notification is diagnosed too, and simply
+          # proposes no action. Without it a resolved alert would be invisible
+          # to the agent and its proposed action would sit pending until it
+          # expired.
+          #
+          # Alertmanager re-sends a notification it has not had acknowledged
+          # (repeat_interval above, 1h). The agent deduplicates re-sends inside
+          # its own window - agent.incident.dedup-window-seconds, 300s - and
+          # answers a duplicate from the first investigation rather than
+          # investigating again.
+          - url: http://agent-service.devsecops.svc.cluster.local:8085/alert
+            send_resolved: true
+            # Alertmanager's own timeout for the delivery. The agent answers
+            # from a rule table in well under this; a model-backed deployment
+            # with a slow Ollama is the reason this is generous rather than
+            # tight.
+            timeout: 30s

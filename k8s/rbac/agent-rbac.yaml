@@ -1,0 +1,165 @@
+# Phase 9 - the agent's Kubernetes identities.
+#
+# Phase 7 gave every workload a ServiceAccount and no token, because none of
+# them called the API server. The agent is the exception: its Phase 9 tools read
+# Pods, logs, Events and workload specs, so it needs a token - and the moment it
+# has one, what that token may do is the whole security story.
+#
+# This file defines exactly two identities, and they are deliberately not the
+# same one:
+#
+#   agent-service   read-only. Bound by default. This is what the deployed
+#                   ServiceAccount gets, and it is what makes the "read-only"
+#                   guarantee true at the API server rather than only in the
+#                   agent's own code - a bug in HttpDiagnosticTools cannot turn
+#                   a GET into anything else, because nothing else is granted.
+#
+#   agent-executor  write, and NOT bound by default. Only ever used by
+#                   KubernetesActionExecutor, only with its own credential, and
+#                   only after a human approval. Binding it is the explicit
+#                   opt-in that turns the agent from "proposes an action" into
+#                   "can carry one out"; see the RoleBinding at the bottom.
+#
+# Both Roles are namespaced. Neither can reach another namespace, and neither
+# can touch cluster-scoped resources such as Nodes.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-diagnostics
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+rules:
+  # The core resources the investigation reads. pods/log is a subresource with
+  # its own name - granting "pods" alone does not grant a log.
+  #
+  # "secrets" is absent on purpose even though HttpDiagnosticTools can name it.
+  # If the agent ever asks for one, the API server refuses, the tool records a
+  # missing reading, and the diagnosis proceeds without the secret. Denying it
+  # here rather than in the code is what makes the denial hold if the code is
+  # wrong.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - events
+    verbs: ["get", "list", "watch"]
+  # The workload specs. A deployment's pod template is where a bad image, a bad
+  # probe or a bad environment variable is actually visible, so these are the
+  # resources a "why is this crash-looping" question needs.
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-diagnostics
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+subjects:
+  - kind: ServiceAccount
+    name: agent-service
+    namespace: devsecops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-diagnostics
+---
+# The executor Role: the only grant in the platform that can change a running
+# workload, and the narrowest one that lets the three supported actions work.
+#
+#   restart  patch a Deployment (the annotation patch)
+#   scale    get a Deployment, then patch its spec.replicas
+#   rollback patch a Deployment's pod template back to an earlier ReplicaSet
+#
+# "delete" is granted nowhere. The agent cannot remove a workload, a namespace
+# or a Pod, which caps the damage of any prompt injection that gets past the
+# approval gate at "the workload was restarted when it should not have been".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-executor
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  # Rollback reads the ReplicaSet history to find the previous pod template; it
+  # never changes one, so this stays read-only.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+---
+# The executor identity. Separate from agent-service on purpose: the agent's own
+# ServiceAccount must not be able to act, so that a compromised read path cannot
+# become a write path by simply presenting the token it already has.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-executor
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+automountServiceAccountToken: false
+---
+# ---------------------------------------------------------------------------
+# NOT APPLIED BY DEFAULT: the binding that lets the agent actually act.
+#
+# Everything above this line is safe to apply as-is: the agent can read and
+# propose, and evaluating POST /approve returns 401 because no executor
+# credential exists. The two objects below are the opt-in. Apply them only on a
+# deployment that is meant to change workloads, together with the executor
+# credential in k8s/23-agent-service.yaml.
+#
+#   kubectl apply -f k8s/rbac/agent-rbac.yaml
+#   # ...then, to enable acting:
+#   kubectl apply -f k8s/rbac/agent-rbac.yaml   # with the blocks below uncommented
+#
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: agent-executor
+#   namespace: devsecops
+# subjects:
+#   - kind: ServiceAccount
+#     name: agent-executor
+#     namespace: devsecops
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: agent-executor
+#
+# # A long-lived token for agent-executor, mounted into the agent Pod at
+# # /var/run/secrets/agent-executor/token and pointed at by
+# # AGENT_EXECUTOR_TOKEN_FILE. Created at deploy time, never committed - the
+# # same rule as every other credential in this repository.
+# #
+# #   kubectl create token agent-executor -n devsecops --duration=720h
+# #
+# # The mounted form is a Secret instead, so the Pod does not have to be
+# # restarted when the token is rotated:
+# #
+# # apiVersion: v1
+# # kind: Secret
+# # metadata:
+# #   name: agent-executor-token
+# #   namespace: devsecops
+# #   annotations:
+# #     kubernetes.io/service-account.name: agent-executor
+# # type: kubernetes.io/service-account-token
+# ---------------------------------------------------------------------------

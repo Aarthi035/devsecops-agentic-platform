@@ -84,3 +84,19 @@ data:
           - targets: ["order-service.devsecops.svc.cluster.local:8083"]
             labels:
               service: order-service
+
+      # The agent (Phase 9). Scraped for the same reason as the three services
+      # and for one more: the agent's own latency, tool-call count and approval
+      # outcomes are what the Phase 10 dashboard charts. Without this job there
+      # is no way to tell a slow diagnosis from a stuck one.
+      #
+      # Port 8085 matches the container port. The NetworkPolicy that lets this
+      # scrape cross from "monitoring" into "devsecops" is
+      # allow-agent-ingress-from-monitoring in
+      # k8s/network-policies/agent-service-policies.yaml.
+      - job_name: agent-service
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ["agent-service.devsecops.svc.cluster.local:8085"]
+            labels:
+              service: agent-service

@@ -1,21 +1,29 @@
-# Phase 8 - the agent's two doors.
+# Phases 8-9 - the agent's doors.
 #
 # The namespace-wide default-deny-all from Phase 7 already applies to this Pod
-# the moment it exists, so these are the only two conversations the agent is
+# the moment it exists, so these are the only conversations the agent is
 # allowed to have beyond DNS (which allow-dns-egress already covers for every
 # Pod in the namespace):
 #
-#   * ingress-nginx -> agent-service:8085   the Ingress is how POST /analyze-ci
-#                                           is triggered from outside the cluster
-#   * agent-service -> github.com:443       the run, its jobs and its logs
+#   * ingress-nginx    -> agent-service:8085   the Ingress is how the agent's
+#                                             endpoints are triggered from
+#                                             outside the cluster
+#   * alertmanager     -> agent-service:8085   POST /alert, the Phase 9 webhook
+#   * prometheus       -> agent-service:8085   scraping /actuator/prometheus
+#   * agent-service    -> github.com:443       the run, its jobs and its logs
+#   * agent-service    -> API server:443       the read-only Kubernetes tools
+#   * agent-service    -> prometheus:9090      PromQL for an alert investigation
+#                     -> loki:3100             LogQL for the same investigation
 #
 # Kept in its own file rather than added to network-policies.yaml because the
 # rules describe a different kind of workload: the three services only ever talk
-# to each other, while the agent is explicitly allowed to leave the cluster. That
-# is a decision worth being able to review on its own.
+# to each other, while the agent is explicitly allowed to leave the cluster and
+# to reach the monitoring stack. That is a decision worth being able to review
+# on its own.
 #
-# Phase 9 extends this file with the agent's egress to the API server, Prometheus
-# and Loki, and with the monitoring namespace's access to the agent's own metrics.
+# Note what is still missing: the agent cannot reach a service in its own
+# namespace, and nothing in this file lets it reach the internet except on 443
+# to a public address.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -74,3 +82,99 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+---
+# The monitoring namespace -> the agent: Alertmanager delivering POST /alert,
+# and Prometheus scraping /actuator/prometheus.
+#
+# Both arrive on the container port 8085. They are one rule rather than two
+# because a NetworkPolicy selects packets, not intent - once 8085 is open to the
+# monitoring namespace, it is open to both, and writing it as two rules with the
+# same selector would only look stricter.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-ingress-from-monitoring
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8085
+---
+# Egress to the Kubernetes API server - the read-only tools, and nothing else.
+#
+# This is the one rule in the file that reaches *inside* the cluster, and it is
+# written as an ipBlock rather than a namespaceSelector on purpose: the API
+# server is a Service (kubernetes.default.svc, 10.96.0.1) in the default
+# namespace, not a Pod in kube-system, so there is no Pod to select. On kind the
+# service CIDR is 10.96.0.0/12; a different cluster needs its own.
+#
+# The /8 exclusion in the GitHub rule above is what keeps these two honest: that
+# rule covers public 443 only, so it does not quietly grant the API server
+# access this rule is here to grant deliberately.
+#
+# What bounds this egress is not the port but the RBAC: the token the agent
+# presents maps to agent-diagnostics, which is get/list/watch on a short list of
+# resources. Opening 443 to the API server lets the agent ask; the Role decides
+# what it can be told.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-to-api-server
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Egress to the monitoring stack: PromQL on Prometheus, LogQL on Loki.
+#
+# A namespaceSelector rather than the two Service IPs, because both are normal
+# Services backed by Pods. The two ports are different - Prometheus 9090, Loki
+# 3100 - and they are the only two things in that namespace the agent has any
+# business talking to; Grafana, which a human uses, is not reachable from here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-to-monitoring
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 3100
