@@ -1,0 +1,77 @@
+server:
+  port: 8085
+  shutdown: graceful
+  # A CI log can be large, but a diagnosis never needs to be: 1 MiB is the
+  # ceiling for a request body, and the sanitiser truncates long before that.
+  max-http-request-header-size: 16KB
+
+spring:
+  application:
+    name: agent-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+agent:
+  llm:
+    # "heuristic" answers from a rule table in this repository and needs no
+    # model at all, which is what makes the endpoint testable offline and what
+    # the CI job uses - a GitHub runner has no Ollama.
+    #
+    # "ollama" sends the sanitised log to a local model and uses its answer.
+    # See the Phase 8 README section for the two ways to run it.
+    provider: ${AGENT_LLM_PROVIDER:heuristic}
+    base-url: ${AGENT_LLM_BASE_URL:http://localhost:11434}
+    # A small model on purpose: the spec asks for a laptop-sized footprint, and
+    # a diagnosis is a short, structured answer rather than a long essay.
+    model: ${AGENT_LLM_MODEL:llama3.2:3b}
+    timeout-seconds: ${AGENT_LLM_TIMEOUT_SECONDS:60}
+    # The guardrail from the spec: a bounded answer, so a runaway generation
+    # cannot turn into a runaway bill or a runaway wait.
+    max-output-tokens: ${AGENT_LLM_MAX_OUTPUT_TOKENS:700}
+    temperature: ${AGENT_LLM_TEMPERATURE:0.1}
+  github:
+    api-url: ${AGENT_GITHUB_API_URL:https://api.github.com}
+    # The token is read from the environment (a Kubernetes SecretKeyRef in the
+    # cluster, a repository secret in CI). It is never logged, never echoed in
+    # an error message, and never sent to the LLM.
+    token: ${GITHUB_TOKEN:}
+    # Commenting on the pull request is the agent's job, not the workflow's,
+    # but it is behind a flag so a dry run is possible without one.
+    comment-enabled: ${AGENT_GITHUB_COMMENT_ENABLED:true}
+  limits:
+    # Truncation budget for what actually reaches the model (or the rule table).
+    max-log-chars: ${AGENT_MAX_LOG_CHARS:12000}
+    # One diagnosis needs the failing jobs, not all thirty of them. This is the
+    # "max steps" guardrail applied to log fetching.
+    max-failed-jobs: ${AGENT_MAX_FAILED_JOBS:3}
+    github-timeout-seconds: ${AGENT_GITHUB_TIMEOUT_SECONDS:30}
+
+# Actuator: /actuator/health (+ liveness/readiness probes), /actuator/metrics, /actuator/prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    version: 1.0.0
+    description: DevOps Assistant Agent of the DevSecOps sample platform
+
+logging:
+  level:
+    com.devsecops: INFO
+    org.springframework.web: INFO

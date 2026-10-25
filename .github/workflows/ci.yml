@@ -34,7 +34,7 @@ jobs:
       # Do not stop the other services when one fails - we want the full picture.
       fail-fast: false
       matrix:
-        service: [user-service, product-service, order-service]
+        service: [user-service, product-service, order-service, agent-service]
 
     steps:
       - name: Check out
@@ -114,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [user-service, product-service, order-service]
+        service: [user-service, product-service, order-service, agent-service]
 
     steps:
       - name: Check out

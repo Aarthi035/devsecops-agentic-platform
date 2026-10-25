@@ -1,0 +1,76 @@
+# Phase 8 - the agent's two doors.
+#
+# The namespace-wide default-deny-all from Phase 7 already applies to this Pod
+# the moment it exists, so these are the only two conversations the agent is
+# allowed to have beyond DNS (which allow-dns-egress already covers for every
+# Pod in the namespace):
+#
+#   * ingress-nginx -> agent-service:8085   the Ingress is how POST /analyze-ci
+#                                           is triggered from outside the cluster
+#   * agent-service -> github.com:443       the run, its jobs and its logs
+#
+# Kept in its own file rather than added to network-policies.yaml because the
+# rules describe a different kind of workload: the three services only ever talk
+# to each other, while the agent is explicitly allowed to leave the cluster. That
+# is a decision worth being able to review on its own.
+#
+# Phase 9 extends this file with the agent's egress to the API server, Prometheus
+# and Loki, and with the monitoring namespace's access to the agent's own metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-ingress-from-ingress-controller
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8085
+---
+# Egress to GitHub.
+#
+# A NetworkPolicy matches addresses, not names, so "api.github.com" cannot be
+# written down here. The exception list is the accurate part: everything inside
+# the cluster (the Pod and Service CIDRs that kind assigns) is excluded, so this
+# does not quietly become "the agent may talk to anything in the cluster" -
+# default-deny-all still governs that, and what is left is genuinely the public
+# internet on 443.
+#
+# The CIDRs are kind's defaults. A different cluster needs its own, which is why
+# they are written out here rather than assumed to be universal.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-to-github
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443

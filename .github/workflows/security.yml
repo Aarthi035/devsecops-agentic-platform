@@ -172,7 +172,7 @@ jobs:
       # One service's base image failing must not hide the other two.
       fail-fast: false
       matrix:
-        service: [user-service, product-service, order-service]
+        service: [user-service, product-service, order-service, agent-service]
 
     steps:
       - name: Check out
@@ -224,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [user-service, product-service, order-service]
+        service: [user-service, product-service, order-service, agent-service]
 
     steps:
       - name: Check out

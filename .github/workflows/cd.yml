@@ -121,7 +121,7 @@ jobs:
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
           echo "Deploying commit ${TARGET_SHA} (${IMAGE_TAG})" >> "$GITHUB_STEP_SUMMARY"
           echo "${GHCR_TOKEN}" | docker login "${REGISTRY}" -u "${GHCR_USER}" --password-stdin
-          for svc in user-service product-service order-service; do
+          for svc in user-service product-service order-service agent-service; do
             docker pull "${PREFIX}/${svc}:${IMAGE_TAG}"
             # Two tags per service: the immutable one identifies the commit the
             # Deployment runs, the manifest's own 1.0.0 tag is loaded as well so
@@ -144,7 +144,7 @@ jobs:
           # Pin every Deployment to the commit's tag. Applying the manifests
           # alone would leave them on the fixed 1.0.0 tag, which hides which
           # revision is live and makes a rolling update a no-op.
-          for svc in user-service product-service order-service; do
+          for svc in user-service product-service order-service agent-service; do
             kubectl set image "deployment/${svc}" "${svc}=devsecops/${svc}:${IMAGE_TAG}" -n "${NAMESPACE}"
           done
 
@@ -152,7 +152,7 @@ jobs:
         run: |
           kubectl wait --for=condition=available deployment --all -n "${NAMESPACE}" --timeout=300s
           kubectl get pods -n "${NAMESPACE}"
-          for svc in user-service product-service order-service; do
+          for svc in user-service product-service order-service agent-service; do
             echo "${svc}: $(kubectl get deployment "${svc}" -n "${NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
           done
 
@@ -189,6 +189,14 @@ jobs:
             -d '{"userId":1,"productId":1,"quantity":2}'
           cat /tmp/smoke.out
           grep -q '"status":"CREATED"' /tmp/smoke.out
+
+          # The agent is checked from inside the cluster, not through the
+          # Ingress: its only entry point is a POST /analyze-ci from a pipeline
+          # with a GitHub token, and a smoke test has neither. Asking the
+          # deployed container for its readiness is the honest check - it proves
+          # the image started, the port is bound and Spring is serving.
+          kubectl exec -n "${NAMESPACE}" deployment/agent-service -- \
+            wget -q -O - http://127.0.0.1:8085/actuator/health/readiness | grep -q '"status":"UP"'
 
       - name: Report cluster state
         if: always()

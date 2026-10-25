@@ -56,7 +56,13 @@ WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 # A key like SPRING_DATASOURCE_PASSWORD or GRAFANA_ADMIN_TOKEN must never hold
 # a literal value in the repository - it belongs in a Secret. Phase 7's
 # gitleaks scan is the other half of this.
-SECRET_ISH_KEY = re.compile(r"PASSWORD|SECRET|TOKEN|CREDENTIAL|API_KEY", re.IGNORECASE)
+#
+# The exception is the plural "tokenS", which is a *count* rather than a
+# credential: AGENT_LLM_MAX_OUTPUT_TOKENS ("700") bounds how much a model may
+# generate. Matching the singular and leaving the plural alone keeps the rule
+# about credentials instead of about spelling, and nothing is lost at the value
+# level - gitleaks still scans the literal text of every one of these files.
+SECRET_ISH_KEY = re.compile(r"PASSWORD|SECRET|CREDENTIAL|API_KEY|TOKEN(?!S)", re.IGNORECASE)
 
 PROTOCOLS = {"TCP", "UDP", "SCTP"}
 

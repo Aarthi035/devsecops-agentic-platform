@@ -1,0 +1,13 @@
+# Keep the build context to the sources the Dockerfile actually copies.
+# target/ in particular would otherwise be sent to the daemon on every build
+# and can hold a stale jar from a previous run.
+target/
+*.md
+
+# Editor and tooling leftovers.
+.idea/
+.vscode/
+*.iml
+.mvn/
+mvnw
+mvnw.cmd

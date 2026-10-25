@@ -23,7 +23,7 @@ End-to-end local DevSecOps platform for a Java (Spring Boot) microservices appli
 | 5 | Terraform (namespaces/infra) + Ansible (env config) | done |
 | 6 | Monitoring and logging (Prometheus, Grafana, Loki, Promtail, Alertmanager) | done |
 | 7 | DevSecOps (Trivy, Dependency-Check/SonarQube, gitleaks, RBAC, NetworkPolicies) | done |
-| 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | pending |
+| 8 | Agent v1 (CI log analysis, `/analyze-ci`, PR comment) | done |
 | 9 | Agent v2 (Prometheus/Loki/kubectl/Trivy tools, `/alert`, approval gate, audit log) | pending |
 | 10 | Evals, Langfuse tracing, Grafana agent panel, demo scripts, report | pending |
 
@@ -127,10 +127,13 @@ devsecops-agentic-platform/
 │   ├── 20-user-service.yaml  # Deployment + ClusterIP Service
 │   ├── 21-product-service.yaml
 │   ├── 22-order-service.yaml
+│   ├── 23-agent-service.yaml # Phase 8 - agent ServiceAccount/ConfigMap/Secret/Deployment/Service/Ingress
 │   ├── 30-hpa.yaml
 │   ├── 40-ingress.yaml
 │   ├── rbac/serviceaccounts.yaml              # Phase 7 - one powerless ServiceAccount per service
-│   └── network-policies/network-policies.yaml # Phase 7 - default-deny + explicit allow rules
+│   └── network-policies/
+│       ├── network-policies.yaml              # Phase 7 - default-deny + explicit allow rules
+│       └── agent-service-policies.yaml        # Phase 8 - the agent's own narrow ingress and egress
 ├── kind/
 │   └── kind-config.yaml      # cluster definition: port 80 -> host 8090
 ├── monitoring/               # Phase 6 - applied with "kubectl apply -R -f monitoring/"
@@ -942,14 +945,166 @@ Two negative tests were run on purpose, because a linter that has only ever pass
 
 ---
 
-## CI pipeline (Phase 2, extended in Phases 3, 5, 6 and 7)
+## DevOps Assistant Agent (Phase 8)
+
+Phases 1–7 built a platform that **reports**: a pipeline goes red, a scan finds a CVE, an alert fires, and a human reads the result. Phase 8 adds the thing that reads it instead — [`services/agent-service`](services/agent-service), a fourth Spring Boot service that takes a failed GitHub Actions run, finds the failing step, reads its log, and writes a diagnosis back as a comment on the pull request.
+
+| Piece | What it is | Lives in |
+|-------|-----------|----------|
+| `POST /analyze-ci` | The Phase 8 trigger — one failed run in, one diagnosis out | [`AnalyzeCiController`](services/agent-service/src/main/java/com/devsecops/agentservice/web/AnalyzeCiController.java) |
+| The pipeline | Read the run → find failed jobs → fetch + sanitize logs → diagnose → comment | [`CiAnalysisService`](services/agent-service/src/main/java/com/devsecops/agentservice/analysis/CiAnalysisService.java) |
+| GitHub access | Four REST calls, and a redirect that must not carry the token | [`GithubClient`](services/agent-service/src/main/java/com/devsecops/agentservice/github/GithubClient.java) |
+| The diagnosis | Two interchangeable engines behind one interface | [`diagnosis/`](services/agent-service/src/main/java/com/devsecops/agentservice/diagnosis) |
+| Log hygiene | Redaction and truncation, both before any engine sees the text | [`LogSanitizer`](services/agent-service/src/main/java/com/devsecops/agentservice/logs/LogSanitizer.java) |
+| The record | One JSON line per tool call and per conclusion | [`AuditLog`](services/agent-service/src/main/java/com/devsecops/agentservice/audit/AuditLog.java) |
+
+### The pipeline, in order
+
+v1 of the agent is deliberately **linear**. It is given a target and works through a fixed sequence, and that is a feature rather than a placeholder: it is possible to say exactly what a service will do before it does it, which is worth having in something that writes to pull requests. (Phase 9 replaces the sequence with a loop that picks its own tools; Phase 8 is what makes the tools worth picking.)
+
+| Step | What happens | Why it is there |
+|------|--------------|-----------------|
+| 1 | `GET /repos/{repo}/actions/runs/{id}` | The run's name, branch, SHA and conclusion end up in the response — the answer has to stand alone in a pipeline log |
+| 2 | `GET .../runs/{id}/jobs?filter=latest`, keep the non-successful ones, cap at `agent.limits.max-failed-jobs` | One failed job costs one log download and, under Ollama, one model call. The spec's "max steps" guardrail belongs here, where the work would otherwise be unbounded |
+| 3 | Per job: download the log, **sanitize, then truncate** | Nothing reaches an engine before `LogSanitizer` has both redacted it and cut it to `max-log-chars` |
+| 4 | `diagnosisEngine.diagnose(...)` | The one call the two engines answer differently |
+| 5 | Build the response, then work out the pull request and comment | A failed comment does not fail the request — see below |
+| 6 | One `AUDIT` line per tool call, one for the decision | Ids, counts and conclusions; never log text |
+
+The response carries the primary diagnosis (the first failed job's) *and* every analysed job's own diagnosis, so nothing is thrown away. It also carries `truncated` per job and `logChars` — a diagnosis drawn from a truncated log is a different claim from one drawn from the whole log, and the reader is told which they have.
+
+### Two engines behind one interface
+
+`DiagnosisEngine` has one method, and exactly one implementation is in the context at a time, chosen by `agent.llm.provider`:
+
+- **`heuristic`** (the default) answers from an ordered rule table inside the image — disk full, Docker socket missing, OOM, Maven dependency failure, compile error, test failure, registry auth, DNS, a leaked secret caught by gitleaks, a Trivy gate, a `kubectl` rollout failure, and a few more. It needs nothing installed, which is what makes the endpoint testable offline, what the CI job uses (a GitHub runner has no Ollama), and what the Phase 10 evaluation scores against — a deterministic engine is the only way "expected root cause" can be a stable assertion.
+- **`ollama`** posts the sanitized log to a local model with `format: json` and a fixed JSON contract, bounded by `max-output-tokens`. A parse failure is an upstream error, not a warning: a diagnosis the agent cannot read is not a diagnosis, and returning half of one would be worse than saying so.
+
+Both return the same record — root cause, evidence, suggested fix, `recommended_action`, confidence — so the endpoint, the comment and the tests are written once.
+
+The evidence field is the one that has to be honest. The rule table cites the log lines that matched; when nothing matches, it returns the log's last few non-blank lines at confidence `0.2` rather than an empty array, because "here is the tail I could not explain" is a more useful answer than silence. CI log text is treated as untrusted input throughout: the engines classify it, and nothing in the agent acts on instruction-shaped text found inside a log.
+
+### The GitHub client and the redirect that is not followed automatically
+
+Four REST calls and no Octokit — the same reasoning that kept Spring AI out: it is four requests, and the JDK already ships an HTTP client.
+
+The non-obvious one is the log download. GitHub does not return the log; it returns `302 Found` with a `Location` pointing at a **short-lived signed blob URL on a different host**, and that host rejects the request if the `Authorization` header is still attached. `HttpClient.Redirect.NORMAL` would follow the redirect *and keep the header*, which fails with an opaque `400` from the blob store. So redirects are disabled and followed by hand, and the signed URL is fetched with no credentials — which is both what the blob store expects and the safer choice, since the token is never sent to a host the agent did not choose. The signed URL itself is never logged either: it is a credential.
+
+Least privilege is expressed three times over: the token is read only from configuration (`GITHUB_TOKEN`, a Kubernetes `SecretKeyRef` or a repository secret; see [`AgentProperties`](services/agent-service/src/main/java/com/devsecops/agentservice/config/AgentProperties.java)), it is never put into a log line or an exception message, and it is never sent to the model. The scope it needs is `actions: read` to fetch runs and logs, plus `issues: write` **only** if the agent should comment — it never pushes code and never merges.
+
+### What gets written back, and when it does not
+
+The comment is a delivery mechanism, so it is treated as one: if GitHub rejects it, the caller still gets the diagnosis and the response says why the comment did not land. A `502` there would suggest the analysis failed when it did not.
+
+Every response carries a `comment.reason`, populated **including on success** (`"posted"`). A caller — or an audit log reader — should never have to guess why no comment appeared. The four ways there is no comment, in the order they are checked:
+
+1. the run belongs to no pull request and the request did not name one;
+2. commenting is off — `agent.github.comment-enabled=false`, or `comment: false` on the request;
+3. no `GITHUB_TOKEN` is configured, which is the supported dry-run mode;
+4. GitHub refused it.
+
+The comment body is Markdown with a provenance footer (run, job, provider, commit) and a truncation notice when one applies. Values interpolated into it are escaped so a log line containing a backtick cannot break out of inline code.
+
+### API
+
+```jsonc
+// POST /analyze-ci
+{
+  "repository": "owner/name",   // required, must look like owner/name
+  "runId": 1234,                // required, positive
+  "pullNumber": 7,              // optional; defaults to the run's own PR
+  "comment": false              // optional; overrides agent.github.comment-enabled
+}
+```
+
+The response is the run's identity, the per-job outcomes, the primary diagnosis, `provider`, and the comment outcome. A malformed body is `400`; unreachable GitHub or an unreadable model answer is `502`. An authenticated-but-wrong repository or run id is reported as `404` with the path that failed — and never with the token.
+
+The controller is thin on purpose — validate, delegate, return — so all of the behaviour worth testing lives in `CiAnalysisService` and its test does not need a web layer to be meaningful.
+
+### Guardrails, and where each one bites
+
+| Guardrail | Value | Applied |
+|-----------|------:|---------|
+| Max log characters reaching an engine | `agent.limits.max-log-chars`, 12 000 | [`LogSanitizer.truncate`](services/agent-service/src/main/java/com/devsecops/agentservice/logs/LogSanitizer.java) — head 60 % / tail 40 %, with a marker naming how much was dropped |
+| Max failed jobs per request | `agent.limits.max-failed-jobs`, 3 | [`GithubClient.fetchFailedJobs`](services/agent-service/src/main/java/com/devsecops/agentservice/github/GithubClient.java) — the cap is applied before any download |
+| Max log bytes downloaded | 5 MiB | `GithubClient` — a ceiling on memory, deliberately looser than the model budget, because the failure is usually at the end of the log |
+| Model output budget | `agent.llm.max-output-tokens`, 700 | `OllamaDiagnosisEngine` |
+| GitHub / model timeout | `agent.limits.github-timeout-seconds`, 30 | Both HTTP clients |
+| Secrets in a log | — | `LogSanitizer` redacts `gh*_`/`github_pat_` tokens, `AKIA…` keys, `Bearer …`, `key=value` pairs, whole PEM blocks, and the agent's own configured token by literal match |
+| Secrets in the audit trail | — | `AuditLog` checks the **field name**, not the value, so a token passed by mistake is redacted without anyone having to think about it |
+
+Truncation keeps the head *and* the tail rather than cutting at the limit: the first failure in a log is usually the cause, and a tool chain usually prints its summary at the end. Plain truncation would lose the summary, which is often the single most useful line in the file.
+
+### Containerization and Kubernetes
+
+The [Dockerfile](services/agent-service/Dockerfile) is the same two-stage shape as the other three services — Maven build, then a `eclipse-temurin:17-jre-jammy` runtime with a uid/gid `1001` user and a `HEALTHCHECK` on the readiness probe. The Ubuntu (glibc) JRE variant rather than Alpine (`musl`) is deliberate: the alpine tag fails to exec on this build host, while jammy runs everywhere.
+
+[`k8s/23-agent-service.yaml`](k8s/23-agent-service.yaml) adds the fourth workload, following the `2x-<service>.yaml` convention: its own ServiceAccount (still `automountServiceAccountToken: false` — Phase 8 does not call the API server), an `agent-config` ConfigMap, an `agent-credentials` Secret whose `stringData` is empty and stays that way in Git, the Deployment, a ClusterIP Service, and its own Ingress.
+
+Two things differ from the other three services, both for the same reason — the agent is the first workload with an opinion about the outside world:
+
+- it is **network-restricted on both sides**. [`agent-service-policies.yaml`](k8s/network-policies/agent-service-policies.yaml) allows ingress only from `ingress-nginx` on 8085, and egress only to public HTTPS (TCP 443) with RFC1918 ranges excluded via `ipBlock`, so it cannot be used to reach the rest of the private network. `default-deny-all` from Phase 7 still governs everything else.
+- it keeps its configuration **to itself**. `agent-config` is separate from the shared `app-config`: the agent shares no setting with the three services, and putting `AGENT_LLM_PROVIDER` next to `APP_SEED_ENABLED` would only make both harder to read.
+
+The agent is also the bigger pod — `200m`/`384Mi` requested, `1`/`768Mi` limited — because the request has to cover a JVM plus an in-flight log.
+
+`cd.yml` builds, loads and rolls out the fourth image alongside the other three, and the deployed agent is smoke-tested **from inside the cluster** rather than through the Ingress: its only entry point is a `POST` that needs a GitHub token and a real run id, and a smoke test has neither. Asking the container for its readiness is the honest check — it proves the image started, the port is bound and Spring is serving.
+
+### What has actually been tested
+
+| Check | Result |
+|-------|--------|
+| `mvn -o -B -ntp test` in `services/agent-service` | **Tests run: 45, Failures: 0, Errors: 0, Skipped: 0** — exit 0 |
+| `python .github/scripts/check-security.py` | `OK: 12 file(s), 29 document(s), 4 service account(s), 4 workload(s), 7 network policy(ies)`, exit 0 |
+
+The 45 tests, and what each is actually pinning down:
+
+| Class | n | Covers |
+|-------|--:|--------|
+| `CiAnalysisServiceTest` | 10 | The pipeline: sanitize-before-engine (asserts the engine never sees the token, and sees ≤ the budget), the failed-job cap, comment disabled / no PR / no token / GitHub failure, and a run with no failed job |
+| `GithubClientTest` | 8 | Against a real loopback HTTP server: run mapping, the failed-job filter **and its limit**, the hand-followed redirect **plus that the token is not resent**, 404 → upstream error, a 401 message that does not echo the token, comment URL read-back, and `hasToken()` |
+| `OllamaDiagnosisEngineTest` | 7 | A well-formed answer, an out-of-range confidence, a Markdown-fenced object, prose instead of JSON, an empty answer, an unavailable model, an unreachable endpoint |
+| `AnalyzeCiControllerTest` | 6 | `@WebMvcTest`: valid request, missing repository, a path-traversal-looking repository, a non-positive run id, malformed JSON, upstream → 502 |
+| `PullRequestCommenterTest` | 3 | Provenance and confidence rendering, the truncation notice, and backtick-breakout prevention |
+| `HeuristicDiagnosisEngineTest` | 3 | The rule table, and the low-confidence fallback |
+| `AuditLogTest` | 3 | A credential-shaped field is redacted, the entry is one JSON line, null values are kept |
+| `LogSanitizerTest` | 2 | Redaction and truncation ordering |
+| `AgentEndpointIntegrationTest` | 3 | `@SpringBootTest` on a random port: a full HTTP diagnosis under `heuristic`, `400` on an invalid body, and `/actuator/health` `UP` |
+
+Two of those are worth calling out as negative tests, because a test suite that has only ever seen the happy path is a test suite nobody should trust: the token is asserted **absent** from what the engine received, and the redirect test asserts the `Authorization` header is **not** present on the second request.
+
+**Blocked, and therefore not claimed:**
+
+| Not verified | Why |
+|--------------|-----|
+| `docker build` of the agent image, and `docker compose up` | Docker Desktop's Linux engine is down on this host (see the Phase 7 table); the image is built for the first time in CI's `images` job |
+| Applying `k8s/23-agent-service.yaml` to a live cluster | Same engine, and the manifests are cluster-only |
+| `POST /analyze-ci` against a real GitHub repository, and a real PR comment | Needs a `GITHUB_TOKEN` with `actions: read` and `issues: write`, and a repository with a genuinely failed run. The GitHub client is instead tested against a local HTTP server that reproduces the redirect and the error codes; the deployed path is exercised by `cd.yml`'s readiness check |
+| A diagnosis from Ollama | Needs a model pulled locally (`ollama pull llama3.2:3b`). The default `heuristic` provider needs nothing, and the Ollama path is tested against a stub server |
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `502` with "GitHub rejected the request (401)" | `GITHUB_TOKEN` is unset, expired, or lacks `actions: read`. The message names the path and the scopes but never the token. |
+| The log download returns `400` and the run exists | A redirect followed automatically with the `Authorization` header attached. `GithubClient` disables redirects and re-requests the signed URL without the token; anything that re-enables `Redirect.NORMAL` reintroduces this exact failure. |
+| `404` from GitHub on a repository that clearly exists | A private repository, or a token that cannot see it. GitHub returns `404` rather than `403` for a private repository the token cannot read, on purpose. |
+| The diagnosis has `confidence: 0.2` and cites the log's last lines | No rule matched. That is the honest answer with no evidence; read the cited lines, or run with `AGENT_LLM_PROVIDER=ollama` for a model's reading of the same text. |
+| `comment.posted` is `false` with "No GitHub token is configured" | The dry run. Set `GITHUB_TOKEN` to enable comments; nothing else changes. |
+| A diagnosis says the log was truncated | `max-log-chars` was hit. Raise it if the failure is early in the log, but remember it is also what bounds the model's context window. |
+| An Ollama run returns "could not parse a JSON diagnosis" | The model answered prose or fenced Markdown the extractor could not salvage. Use a model that follows the JSON contract, or stay on `heuristic`. |
+| `OutOfMemoryError` during a large diagnosis | A 5 MiB download plus a JVM. The container limit is `768Mi`; the guardrail to lower first is `max-log-chars`. |
+
+---
+
+## CI pipeline (Phase 2, extended in Phases 3, 5, 6, 7 and 8)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `dev` and `feature/**`, on every PR into `main`/`dev`, and on demand.
 
 | Job | What it does |
 |-----|--------------|
-| `build` (matrix: 3 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
-| `docker` (matrix: 3 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
+| `build` (matrix: 4 services) | Checks out, sets up Temurin JDK 17, restores the Maven cache, runs `mvn -B verify`, writes a per-service test summary to the run's Summary tab, uploads surefire reports and the runnable jar as artifacts |
+| `docker` (matrix: 4 services) | Phase 3 — builds each multi-stage image, asserts it does not run as root, pushes to GHCR from `main`/tags |
 | `iac` | Phase 5 — `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`, then `ansible-playbook --syntax-check` and `ansible-lint` on both playbooks. Runs against no cluster |
 | `monitoring` | Phase 6 — installs PyYAML and runs `.github/scripts/check-monitoring.py`, a cluster-free linter over `monitoring/*.yaml`: valid YAML, no `Namespace` object where Terraform owns one, every workload pinned to `monitoring` with tagged images, resource requests/limits, readiness probes and no literal secret values, and every alert rule carrying `expr`/`severity`/`annotations.summary` |
 | `security` | Phase 7 — installs PyYAML and runs `.github/scripts/check-security.py`, a cluster-free linter over `k8s/**/*.yaml`: every workload on a real, non-`default` ServiceAccount with no mounted token and `runAsNonRoot`, tagged images with readiness probes and dropped capabilities, no literal secrets, and the ServiceAccounts/NetworkPolicies themselves (a `default-deny-all` is mandatory, and no policy may select a workload that does not exist) |
@@ -957,7 +1112,7 @@ Two negative tests were run on purpose, because a linter that has only ever pass
 
 Design notes:
 
-- **Matrix, `fail-fast: false`** — the three services are independent Maven projects, so they build in parallel and one failure never hides another.
+- **Matrix, `fail-fast: false`** — the four services are independent Maven projects, so they build in parallel and one failure never hides another.
 - **Caching** — `actions/setup-java` caches `~/.m2/repository` keyed on each service's `pom.xml`, so a dependency change invalidates the cache and a code-only change reuses it.
 - **Artifacts** — `test-reports-<service>` (7 days) and `<service>-jar` (7 days).
 - **Least privilege** — the workflow declares `permissions: contents: read`; only the `docker` job widens that, and only with `packages: write`.

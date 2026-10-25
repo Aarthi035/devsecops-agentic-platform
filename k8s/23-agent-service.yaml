@@ -1,0 +1,228 @@
+# agent-service: the DevOps Assistant Agent (Phase 8).
+#
+# The agent is the fourth workload in the namespace and the first one that has
+# an opinion about the outside world: it reads GitHub, and (from Phase 9) reads
+# Prometheus, Loki, the API server and the Trivy reports. Everything the
+# namespace already enforces still applies to it - it runs non-root, with a
+# read-only root filesystem, its own ServiceAccount and no token mount - and the
+# two things it needs that the other services do not are its own ConfigMap and
+# its own egress rules (k8s/network-policies/agent-service-policies.yaml).
+#
+# Deliberately NOT in app-config: the agent shares no configuration with the
+# three services, and putting its LLM and GitHub settings next to
+# APP_SEED_ENABLED would only make the two harder to read.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+# Phase 8 does not call the Kubernetes API. Phase 9's read-only tools do, and
+# they flip this to true in k8s/rbac/agent-rbac.yaml - where the Role that makes
+# the token worth mounting is defined. Until then the token would be pure
+# liability, exactly as in Phase 7.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+data:
+  # "heuristic" is the default and the only provider that works with no extra
+  # pod: it answers from the rule table inside the image, which is what lets the
+  # deployed agent be exercised without an Ollama instance and is what the
+  # Phase 10 evaluation scores against.
+  #
+  # Set AGENT_LLM_PROVIDER=ollama (and AGENT_LLM_BASE_URL to a reachable Ollama)
+  # to have a model write the diagnosis instead. Nothing else changes.
+  AGENT_LLM_PROVIDER: "heuristic"
+  AGENT_LLM_MODEL: "llama3.2:3b"
+  AGENT_LLM_TIMEOUT_SECONDS: "60"
+  AGENT_LLM_MAX_OUTPUT_TOKENS: "700"
+
+  # Commenting is on, but it only happens when GITHUB_TOKEN is present (see the
+  # agent-credentials Secret below). With no token the agent still diagnoses and
+  # reports why it did not comment.
+  AGENT_GITHUB_COMMENT_ENABLED: "true"
+
+  # The guardrails, as environment variables so they can be tuned without
+  # rebuilding the image.
+  AGENT_MAX_LOG_CHARS: "12000"
+  AGENT_MAX_FAILED_JOBS: "3"
+  AGENT_GITHUB_TIMEOUT_SECONDS: "30"
+---
+# Created at deploy time, never committed - same rule as k8s/11-secret.yaml.
+#
+#   kubectl create secret generic agent-credentials -n devsecops \
+#     --from-literal=GITHUB_TOKEN=ghp_... \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# The token needs the narrowest scope that works: "actions: read" to fetch runs
+# and logs, plus "issues: write" (or "pull_requests: write") only if the agent
+# should comment. Nothing else - the agent never pushes code or merges.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-credentials
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+type: Opaque
+stringData: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  # No HPA here on purpose: the agent is a low-traffic, bursty webhook consumer,
+  # and a laptop that scales it up would scale the JVM heap too.
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-service
+        app.kubernetes.io/part-of: devsecops-platform
+    spec:
+      serviceAccountName: agent-service
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # A diagnosis in flight holds a log in memory and may be waiting on a model;
+      # a SIGKILL mid-analysis loses the answer, so the JVM gets time to finish
+      # (Spring's graceful shutdown is configured for 20s in application.yml).
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: agent-service
+          image: devsecops/agent-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: agent-config
+            # optional: the agent starts without a token and simply cannot
+            # comment, which is the correct behaviour for a dry run.
+            - secretRef:
+                name: agent-credentials
+                optional: true
+          env:
+            # Named explicitly as well as through the secretRef so the value can
+            # never be confused with a ConfigMap key of the same name.
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-credentials
+                  key: GITHUB_TOKEN
+                  optional: true
+          resources:
+            # Bigger than the three services: the request has to cover a JVM plus
+            # a truncated job log (12 000 characters by default, but a fetched
+            # log can be up to 5 MiB before the sanitiser touches it).
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-service
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-service
+  ports:
+    - name: http
+      port: 8085
+      targetPort: http
+      protocol: TCP
+---
+# Its own Ingress rather than a fourth path on devsecops-api: the agent's routes
+# are not under /api (the spec fixes /analyze-ci, /alert and /analyze-security),
+# and keeping them in this file means the platform's public API surface and the
+# agent's trigger surface stay separately reviewable.
+#
+# This is how a GitHub Actions job on a self-hosted runner - or curl from the
+# laptop - reaches POST /analyze-ci through port 8090.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devsecops-agent
+  namespace: devsecops
+  labels:
+    app.kubernetes.io/name: agent-service
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /analyze-ci
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-service
+                port:
+                  number: 8085
