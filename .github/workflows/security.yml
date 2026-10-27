@@ -298,7 +298,25 @@ jobs:
             exit 0
           fi
           echo "Using the NVD API key provided by the repository secret."
-          mvn $MAVEN_ARGS -Dnvd.api.key="${NVD_API_KEY}" dependency-check:check
+          # The NVD API is a third party and it flakes: a 524 (Cloudflare's
+          # origin-timeout) partway through the update aborts the whole
+          # analysis with NvdApiException -> UpdateException -> NoDataException,
+          # which prints like a security failure and is not one. Retry before
+          # believing it. A failed attempt still leaves whatever it managed to
+          # cache behind, so a retry resumes the update rather than restarting
+          # it from nothing - which is why a second attempt usually succeeds.
+          attempts=3
+          for attempt in $(seq 1 "${attempts}"); do
+            if mvn $MAVEN_ARGS -Dnvd.api.key="${NVD_API_KEY}" dependency-check:check; then
+              exit 0
+            fi
+            echo "::warning::dependency-check:check failed on attempt ${attempt} of ${attempts}."
+            if [ "${attempt}" -lt "${attempts}" ]; then
+              sleep 30
+            fi
+          done
+          echo "::error::dependency-check:check failed on all ${attempts} attempts."
+          exit 1
 
       - name: Upload the report
         if: always()
